@@ -232,7 +232,13 @@ class DeviceWorker:
 
         unit_data = await self._read_char(client, TEMPERATURE_UNIT_UUID, services)
         if unit_data:
-            payload["unit"] = "C" if unit_data[0] == 0 else "F"
+            raw_unit = unit_data[0]
+            LOG.debug("Unit characteristic raw byte: %d for %s", raw_unit, self.address)
+        # iGrill probe temperature values are always reported in Celsius by the
+        # BLE hardware, regardless of the unit characteristic. The unit byte only
+        # reflects the display preference set on the physical device, not the
+        # encoding of the temperature data.
+        payload["unit"] = "C"
 
         battery_data = await self._read_char(client, BATTERY_LEVEL_UUID, services)
         if battery_data:
