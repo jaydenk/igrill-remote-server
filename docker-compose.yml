@@ -1,0 +1,37 @@
+services:
+  igrill:
+    build: .
+    container_name: igrill-service
+    environment:
+      - IGRILL_PORT=${IGRILL_PORT:-39120}
+      - IGRILL_POLL_INTERVAL=${IGRILL_POLL_INTERVAL:-15}
+      - IGRILL_TIMEOUT=${IGRILL_TIMEOUT:-30}
+      - IGRILL_MAC_PREFIX=${IGRILL_MAC_PREFIX:-70:91:8F}
+      - IGRILL_BIND_ADDRESS=${IGRILL_BIND_ADDRESS:-0.0.0.0}
+      - IGRILL_SCAN_INTERVAL=${IGRILL_SCAN_INTERVAL:-60}
+      - IGRILL_SCAN_TIMEOUT=${IGRILL_SCAN_TIMEOUT:-5}
+      - IGRILL_LOG_LEVEL=${IGRILL_LOG_LEVEL:-INFO}
+      - IGRILL_RECONNECT_GRACE=${IGRILL_RECONNECT_GRACE:-60}
+      - IGRILL_DB_PATH=${IGRILL_DB_PATH:-/data/igrill.db}
+      - IGRILL_SESSION_TOKEN=${IGRILL_SESSION_TOKEN:-}
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+    volumes:
+      - /run/dbus:/run/dbus
+      - /etc/localtime:/etc/localtime:ro
+      - igrill-data:/data
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.igrill.rule=Host(`igrill.${HOSTNAME}`)"
+      - "traefik.http.routers.igrill.entrypoints=web-secure"
+      - "traefik.http.routers.igrill.tls.certresolver=myresolver"
+      - "traefik.http.services.igrill.loadbalancer.server.port=39120"
+    networks:
+      - proxy
+
+volumes:
+  igrill-data:
+
+networks:
+  proxy:
+    external: true

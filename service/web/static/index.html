@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iGrill Remote</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a2e;
+      --bg-secondary: #16213e;
+      --bg-card: #0f3460;
+      --bg-card-hover: #134074;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0b8;
+      --text-muted: #6c6c80;
+      --accent: #e94560;
+      --green: #4ade80;
+      --red: #f87171;
+      --yellow: #fbbf24;
+      --border: #2a2a4a;
+      --radius: 10px;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    header {
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+      transition: background 0.3s ease;
+    }
+
+    .status-dot.connected {
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green);
+    }
+
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .section-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    /* -- Session Panel -------------------------------------------------- */
+
+    .session-panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+    }
+
+    .session-panel .session-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .session-field label {
+      display: block;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 0.2rem;
+    }
+
+    .session-field .value {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .session-field .value.inactive {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    /* -- Targets -------------------------------------------------------- */
+
+    .targets-row {
+      margin-top: 0.75rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .target-badge {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 4px;
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    /* -- Device Cards --------------------------------------------------- */
+
+    .device-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+
+    .device-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      transition: background 0.2s ease;
+    }
+
+    .device-card:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .device-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+
+    .device-name {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .device-model {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    .battery-badge {
+      font-size: 0.75rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    .battery-badge.good {
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--green);
+    }
+
+    .battery-badge.medium {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--yellow);
+    }
+
+    .battery-badge.low {
+      background: rgba(248, 113, 113, 0.15);
+      color: var(--red);
+    }
+
+    .probes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 0.5rem;
+    }
+
+    .probe {
+      background: var(--bg-secondary);
+      border-radius: 6px;
+      padding: 0.6rem;
+    }
+
+    .probe-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 0.2rem;
+      text-align: center;
+    }
+
+    .probe-temp {
+      font-size: 1.3rem;
+      font-weight: 700;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .probe-temp.unplugged {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    .device-unit {
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      text-align: right;
+      margin-top: 0.4rem;
+    }
+
+    /* -- Empty State ---------------------------------------------------- */
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-muted);
+    }
+
+    .empty-state p {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+    }
+
+    /* -- Responsive ----------------------------------------------------- */
+
+    @media (max-width: 600px) {
+      main {
+        padding: 1rem;
+      }
+
+      .session-panel .session-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .device-cards {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>iGrill Remote</h1>
+  <div class="connection-status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Disconnected</span>
+  </div>
+</header>
+
+<main>
+  <!-- Session Panel -->
+  <section>
+    <div class="section-title">Session</div>
+    <div class="session-panel">
+      <div class="session-grid">
+        <div class="session-field">
+          <label>Session ID</label>
+          <div class="value inactive" id="sessionId">None</div>
+        </div>
+        <div class="session-field">
+          <label>Started</label>
+          <div class="value inactive" id="sessionStart">&mdash;</div>
+        </div>
+        <div class="session-field">
+          <label>Duration</label>
+          <div class="value inactive" id="sessionDuration">&mdash;</div>
+        </div>
+        <div class="session-field">
+          <label>Device State</label>
+          <div class="value inactive" id="deviceState">Unknown</div>
+        </div>
+      </div>
+      <div class="targets-row" id="targetsRow"></div>
+    </div>
+  </section>
+
+  <!-- Devices -->
+  <section>
+    <div class="section-title">Devices</div>
+    <div class="device-cards" id="deviceCards">
+      <div class="empty-state" id="emptyState">
+        <p>No devices discovered yet.</p>
+        <p>Waiting for data&hellip;</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ------------------------------------------------------------------ */
+  /* State                                                               */
+  /* ------------------------------------------------------------------ */
+
+  var devices = {};         /* keyed by sensorId (MAC address) */
+  var session = {
+    id: null,
+    startTs: null,
+    deviceState: null,
+    targets: []
+  };
+  var durationTimer = null;
+
+  /* DOM refs */
+  var statusDot     = document.getElementById("statusDot");
+  var statusText    = document.getElementById("statusText");
+  var sessionIdEl   = document.getElementById("sessionId");
+  var sessionStartEl= document.getElementById("sessionStart");
+  var sessionDurEl  = document.getElementById("sessionDuration");
+  var deviceStateEl = document.getElementById("deviceState");
+  var targetsRow    = document.getElementById("targetsRow");
+  var deviceCards   = document.getElementById("deviceCards");
+  var emptyState    = document.getElementById("emptyState");
+
+  /* ------------------------------------------------------------------ */
+  /* Helpers                                                             */
+  /* ------------------------------------------------------------------ */
+
+  function generateRequestId() {
+    return "req-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function formatTime(isoString) {
+    if (!isoString) return "\u2014";
+    var d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function formatDuration(startIso) {
+    if (!startIso) return "\u2014";
+    var start = new Date(startIso);
+    if (isNaN(start.getTime())) return "\u2014";
+    var diff = Math.max(0, Math.floor((Date.now() - start.getTime()) / 1000));
+    var h = Math.floor(diff / 3600);
+    var m = Math.floor((diff % 3600) / 60);
+    var s = diff % 60;
+    var parts = [];
+    if (h > 0) parts.push(h + "h");
+    parts.push(m + "m");
+    parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  function batteryClass(pct) {
+    if (pct == null) return "medium";
+    if (pct >= 50) return "good";
+    if (pct >= 20) return "medium";
+    return "low";
+  }
+
+  /** Create an element with optional className and textContent. */
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = String(text);
+    return node;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Rendering                                                           */
+  /* ------------------------------------------------------------------ */
+
+  function renderSession() {
+    if (session.id != null) {
+      sessionIdEl.textContent = session.id;
+      sessionIdEl.classList.remove("inactive");
+      sessionStartEl.textContent = formatTime(session.startTs);
+      sessionStartEl.classList.remove("inactive");
+      sessionDurEl.classList.remove("inactive");
+      updateDuration();
+      startDurationTimer();
+    } else {
+      sessionIdEl.textContent = "None";
+      sessionIdEl.classList.add("inactive");
+      sessionStartEl.textContent = "\u2014";
+      sessionStartEl.classList.add("inactive");
+      sessionDurEl.textContent = "\u2014";
+      sessionDurEl.classList.add("inactive");
+      stopDurationTimer();
+    }
+
+    if (session.deviceState) {
+      deviceStateEl.textContent = humaniseDeviceState(session.deviceState);
+      deviceStateEl.classList.remove("inactive");
+    } else {
+      deviceStateEl.textContent = "Unknown";
+      deviceStateEl.classList.add("inactive");
+    }
+
+    /* Targets */
+    while (targetsRow.firstChild) {
+      targetsRow.removeChild(targetsRow.firstChild);
+    }
+    if (session.targets && session.targets.length > 0) {
+      session.targets.forEach(function (t) {
+        var label = "Probe " + t.probe_index + ": ";
+        if (t.mode === "range") {
+          label += (t.range_low != null ? t.range_low : "?") + "\u2013" + (t.range_high != null ? t.range_high : "?");
+        } else {
+          label += (t.target_value != null ? t.target_value : "\u2014");
+        }
+        targetsRow.appendChild(el("span", "target-badge", label));
+      });
+    }
+  }
+
+  function humaniseDeviceState(state) {
+    switch (state) {
+      case "ok":          return "Connected";
+      case "warming_up":  return "Warming Up";
+      case "offline":     return "Offline";
+      case "error":       return "Error";
+      default:            return state;
+    }
+  }
+
+  function renderDevices() {
+    var keys = Object.keys(devices);
+    if (keys.length === 0) {
+      emptyState.style.display = "";
+      return;
+    }
+    emptyState.style.display = "none";
+
+    /* Remove stale cards */
+    var existingCards = deviceCards.querySelectorAll(".device-card");
+    existingCards.forEach(function (card) {
+      if (!devices[card.dataset.sensorId]) {
+        card.remove();
+      }
+    });
+
+    keys.forEach(function (sensorId) {
+      var dev = devices[sensorId];
+      var card = deviceCards.querySelector("[data-sensor-id=\"" + sensorId + "\"]");
+      if (!card) {
+        card = document.createElement("div");
+        card.className = "device-card";
+        card.dataset.sensorId = sensorId;
+        deviceCards.appendChild(card);
+      }
+      /* Clear existing children and rebuild with safe DOM methods */
+      while (card.firstChild) {
+        card.removeChild(card.firstChild);
+      }
+      buildDeviceCard(card, dev, sensorId);
+    });
+  }
+
+  function buildDeviceCard(card, dev, sensorId) {
+    var data = dev.data || {};
+    var name = data.name || sensorId;
+    var model = data.model_name || data.model || "";
+    var battPct = data.battery_percent;
+    var battLabel = battPct != null ? battPct + "%" : "\u2014";
+    var battCls = batteryClass(battPct);
+    var unit = data.unit || "";
+    var probes = data.probes || [];
+
+    /* Header row */
+    var header = el("div", "device-header");
+    var nameGroup = document.createElement("div");
+    nameGroup.appendChild(el("div", "device-name", name));
+    nameGroup.appendChild(el("div", "device-model", model));
+    header.appendChild(nameGroup);
+    header.appendChild(el("span", "battery-badge " + battCls, battLabel));
+    card.appendChild(header);
+
+    /* Probes grid */
+    if (probes.length > 0) {
+      var grid = el("div", "probes-grid");
+      probes.forEach(function (p) {
+        var probeEl = el("div", "probe");
+        probeEl.appendChild(el("div", "probe-label", "Probe " + p.index));
+        if (p.unplugged) {
+          probeEl.appendChild(el("div", "probe-temp unplugged", "Unplugged"));
+        } else if (p.temperature != null) {
+          probeEl.appendChild(el("div", "probe-temp", Number(p.temperature).toFixed(1) + "\u00B0"));
+        } else {
+          probeEl.appendChild(el("div", "probe-temp unplugged", "\u2014"));
+        }
+        grid.appendChild(probeEl);
+      });
+      card.appendChild(grid);
+      if (unit) {
+        card.appendChild(el("div", "device-unit", "Unit: \u00B0" + unit));
+      }
+    } else {
+      var empty = el("div", "empty-state");
+      empty.style.padding = "1rem 0";
+      empty.appendChild(el("p", null, "No probe data"));
+      card.appendChild(empty);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Duration Timer                                                      */
+  /* ------------------------------------------------------------------ */
+
+  function updateDuration() {
+    sessionDurEl.textContent = formatDuration(session.startTs);
+  }
+
+  function startDurationTimer() {
+    stopDurationTimer();
+    durationTimer = setInterval(updateDuration, 1000);
+  }
+
+  function stopDurationTimer() {
+    if (durationTimer) {
+      clearInterval(durationTimer);
+      durationTimer = null;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* WebSocket                                                           */
+  /* ------------------------------------------------------------------ */
+
+  var ws = null;
+  var reconnectDelay = 1000;  /* start at 1 s */
+  var maxReconnectDelay = 30000;
+  var reconnectAttempt = 0;
+
+  function connect() {
+    var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var url = protocol + "//" + window.location.host + "/ws";
+    ws = new WebSocket(url);
+
+    ws.onopen = function () {
+      reconnectAttempt = 0;
+      reconnectDelay = 1000;
+      setConnectionStatus(true);
+      /* Request current state */
+      ws.send(JSON.stringify({
+        v: 2,
+        type: "status_request",
+        requestId: generateRequestId(),
+        payload: {}
+      }));
+    };
+
+    ws.onmessage = function (event) {
+      var msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
+      handleMessage(msg);
+    };
+
+    ws.onclose = function () {
+      setConnectionStatus(false);
+      scheduleReconnect();
+    };
+
+    ws.onerror = function () {
+      /* onclose will fire after this */
+    };
+  }
+
+  function scheduleReconnect() {
+    reconnectAttempt++;
+    var delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempt - 1), maxReconnectDelay);
+    /* Add a small amount of jitter (up to 20%) */
+    delay += Math.floor(Math.random() * delay * 0.2);
+    setTimeout(connect, delay);
+  }
+
+  function setConnectionStatus(connected) {
+    if (connected) {
+      statusDot.classList.add("connected");
+      statusText.textContent = "Connected";
+    } else {
+      statusDot.classList.remove("connected");
+      statusText.textContent = "Disconnected";
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Message Handling                                                     */
+  /* ------------------------------------------------------------------ */
+
+  function handleMessage(msg) {
+    var type = msg.type;
+    var payload = msg.payload || {};
+
+    switch (type) {
+      case "status":
+        handleStatus(payload);
+        break;
+
+      case "reading":
+        handleReading(payload);
+        break;
+
+      case "session_start":
+        handleSessionStart(payload);
+        break;
+
+      case "session_end":
+        handleSessionEnd(payload);
+        break;
+
+      case "error":
+        console.warn("[iGrill] Server error:", payload.code, payload.message);
+        break;
+    }
+  }
+
+  function handleStatus(payload) {
+    session.id = payload.currentSessionId || null;
+    session.startTs = payload.currentSessionStartTs || null;
+    session.deviceState = payload.deviceState || null;
+    session.targets = payload.activeTargets || [];
+    renderSession();
+  }
+
+  function handleReading(payload) {
+    var sensorId = payload.sensorId;
+    if (!sensorId) return;
+
+    devices[sensorId] = {
+      sensorId: sensorId,
+      sessionId: payload.sessionId,
+      data: payload.data || {}
+    };
+
+    /* Update session info from reading if we have it */
+    if (payload.sessionId != null && session.id !== payload.sessionId) {
+      session.id = payload.sessionId;
+      session.startTs = payload.sessionStartTs || session.startTs;
+    }
+
+    renderDevices();
+    renderSession();
+  }
+
+  function handleSessionStart(payload) {
+    session.id = payload.sessionId || null;
+    session.startTs = payload.sessionStartTs || null;
+    session.targets = payload.targets || session.targets;
+    renderSession();
+  }
+
+  function handleSessionEnd() {
+    session.id = null;
+    session.startTs = null;
+    session.targets = [];
+    renderSession();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Init                                                                */
+  /* ------------------------------------------------------------------ */
+
+  renderSession();
+  renderDevices();
+  connect();
+
+})();
+</script>
+
+</body>
+</html>

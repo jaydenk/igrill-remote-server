@@ -1,0 +1,308 @@
+# docker-igrill
+
+Standalone BLE polling service for iGrill devices that exposes JSON metrics over HTTP. The ESPHome implementation in `components/` remains as a protocol reference.
+
+## Project Structure
+
+```
+service/
+  config.py        # Centralised configuration from environment variables
+  __init__.py      # Package marker
+  main.py          # App factory and entry point (thin ~90-line module)
+  ble/
+    protocol.py       # BLE protocol constants, model definitions, and detection
+    device_worker.py  # DeviceWorker — connects, authenticates, and polls a single iGrill device
+    device_manager.py # DeviceManager — scans for iGrill devices and spawns workers
+  api/
+    envelope.py    # WebSocket v2 message envelope construction
+    websocket.py   # WebSocketHub, WebSocketClient, and v2 protocol handler
+    routes.py      # HTTP route handlers (/metrics, /history, /health) and route setup
+  models/
+    device.py      # DeviceStore — async-safe in-memory device state
+    reading.py     # Temperature probe parsing and reading payload builder
+    session.py     # TargetConfig dataclass for probe target temperatures
+  history/
+    store.py       # HistoryStore — SQLite-backed sessions, readings, and session targets
+  alerts/
+    evaluator.py   # AlertEvaluator — checks probes against targets, emits alert events
+  web/
+    dashboard.py   # Dashboard route handler and static file serving
+    static/
+      index.html   # Single-page monitoring dashboard (vanilla HTML/CSS/JS)
+tests/
+  test_config.py     # Configuration module tests
+  test_protocol.py   # BLE protocol module tests
+  test_models.py     # Data models tests (device store, readings, session config)
+  test_history.py    # HistoryStore tests (sessions, targets)
+  test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
+```
+
+## Quick Start (Docker Compose)
+
+The service is designed to sit behind a [Traefik](https://traefik.io/) reverse proxy. The compose file declares an external `proxy` network and Traefik labels, so ensure your Traefik instance is running and the network exists:
+
+```sh
+docker network create proxy   # one-time setup, if not already created
+docker compose up -d --build
+curl https://igrill.<your-hostname>/metrics
+```
+
+If you need direct port access for local development, add a `ports` section to the compose override:
+
+```yaml
+# docker-compose.override.yml
+services:
+  igrill:
+    ports:
+      - "${IGRILL_PORT:-39120}:${IGRILL_PORT:-39120}"
+```
+
+## Configuration
+To override defaults with a file, copy `env.example` to `.env` and edit values.
+
+- `IGRILL_PORT` (default `39120`): HTTP port for `/metrics`.
+- `IGRILL_POLL_INTERVAL` (default `15`): polling interval in seconds (min 5, max 60).
+- `IGRILL_TIMEOUT` (default `30`): read/connect timeout in seconds.
+- `IGRILL_MAC_PREFIX` (default `70:91:8F`): scan prefix for device MAC addresses.
+- `IGRILL_BIND_ADDRESS` (default `0.0.0.0`): bind address for the HTTP server.
+- `IGRILL_SCAN_INTERVAL` (default `60`): BLE scan interval in seconds.
+- `IGRILL_SCAN_TIMEOUT` (default `5`): BLE scan duration in seconds.
+- `IGRILL_LOG_LEVEL` (default `INFO`): set to `DEBUG` for BLE connection and sensor read logs.
+- `IGRILL_RECONNECT_GRACE` (default `60`): seconds to keep the same session after a disconnect.
+- `IGRILL_DB_PATH` (default `/data/igrill.db`): SQLite database path for session history.
+- `IGRILL_SESSION_TOKEN` (default empty): optional bearer token for session control via WebSocket.
+
+| Variable | Default | Possible values | Notes |
+| --- | --- | --- | --- |
+| `IGRILL_PORT` | `39120` | integer (1-65535) | HTTP port for `/metrics`. |
+| `IGRILL_POLL_INTERVAL` | `15` | integer (5-60) | Polling interval in seconds. |
+| `IGRILL_TIMEOUT` | `30` | integer (>=1) | GATT read/connect timeout in seconds. |
+| `IGRILL_MAC_PREFIX` | `70:91:8F` | MAC prefix string | Prefix used to filter devices during scans. |
+| `IGRILL_BIND_ADDRESS` | `0.0.0.0` | IP address | Bind address for the HTTP server. |
+| `IGRILL_SCAN_INTERVAL` | `60` | integer (>=1) | Time between BLE scans in seconds. |
+| `IGRILL_SCAN_TIMEOUT` | `5` | integer (>=1) | Duration of each BLE scan in seconds. |
+| `IGRILL_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Controls log verbosity for the service and BLE layer. |
+| `IGRILL_RECONNECT_GRACE` | `60` | integer (>=0) | Reuse the same session if a reconnect happens within this window. |
+| `IGRILL_DB_PATH` | `/data/igrill.db` | file path | SQLite DB location for persisted history. |
+| `IGRILL_SESSION_TOKEN` | empty | string | If set, require `Authorization: Bearer <token>` on WebSocket to start sessions. |
+
+## API
+- `GET /` serves the web dashboard — a single-page monitoring UI showing real-time device status, probe temperatures, and session information via WebSocket.
+- `GET /metrics` returns the latest readings for all discovered devices.
+- `GET /history` returns all persisted sessions and readings (optional `?mac=70:91:8F:...`).
+- `GET /health` returns a lightweight health check with uptime, device counts, and active session ID.
+
+History is stored in SQLite at `IGRILL_DB_PATH` (default `/data/igrill.db`). Ensure the container has a persistent `/data` volume if you want history across restarts.
+
+Example response:
+```json
+{
+  "generated_at": "2024-01-01T12:00:00+00:00",
+  "device_count": 1,
+  "devices": [
+    {
+      "address": "70:91:8F:AA:BB:CC",
+      "name": "iGrill_v3",
+      "model": "igrill_v3",
+      "model_name": "IGrill V3",
+      "connected": true,
+      "last_seen": "2024-01-01T12:00:00+00:00",
+      "last_update": "2024-01-01T12:00:15+00:00",
+      "unit": "F",
+      "battery_percent": 92,
+      "propane_percent": null,
+      "probes": [
+        { "index": 1, "temperature": 145.0, "raw": 145, "unplugged": false }
+      ],
+      "connected_probes": [1],
+      "probe_status": "probes_connected",
+      "pulse": {},
+      "error": null,
+      "rssi": -62
+    }
+  ]
+}
+```
+
+### WebSocket Streaming (v2 Protocol)
+Connect to `/ws` for real-time streaming. All messages use the v2 envelope format:
+
+```json
+{"v": 2, "type": "<msg_type>", "ts": "...", "requestId": "...", "payload": {}}
+```
+
+**Client request types:**
+- `status_request` -- returns device state, session info, sample rate, and active targets.
+- `sessions_request` -- lists recent sessions (`payload.limit` defaults to 20, max 100).
+- `history_request` -- streams history chunks (`sinceTs`, `untilTs`, `limit`, `sessionId`, `chunkSize`).
+- `session_start_request` -- starts a new session (requires authorisation). Accepts optional `targets` array and `deviceAddress`.
+- `session_end_request` -- ends the current session (requires authorisation).
+- `target_update_request` -- updates targets for the current session (requires authorisation).
+
+**Server response types:**
+- `status` -- response to `status_request` with device state, session info, sample rate, and active targets.
+- `sessions_list` -- response to `sessions_request` with recent session summaries.
+- `history_chunk` / `history_end` -- streamed response to `history_request`.
+- `session_start_ack` / `session_end_ack` / `target_update_ack` -- acknowledgements for session control requests.
+
+**Server broadcast types:**
+- `reading` -- pushed on each poll cycle with latest probe data.
+- `session_start` / `session_end` -- broadcast when sessions change.
+- `target_approaching` -- probe temperature crossed the pre-alert threshold.
+- `target_reached` -- probe temperature hit the target.
+- `target_exceeded` -- probe temperature went above the target.
+- `target_reminder` -- periodic nudge while temperature remains above target.
+
+Note: `curl` does not support WebSockets. Use a client like `websocat` or `wscat`, or an iOS `URLSessionWebSocketTask`.
+
+## BLE Host Requirements
+- Host must run BlueZ; mount `/run/dbus` into the container and set `DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket`.
+- The container must be able to access the host Bluetooth adapter (run as root in Docker by default).
+
+## ESPHome Reference
+The sections below describe the original ESPHome external component kept in `components/` for reference.
+
+## Installation
+
+To use this component, include it as an [External component](https://esphome.io/components/external_components.html)
+
+```yaml
+external_components:
+  - source: github://bendikwa/esphome-igrill@v1.2
+```
+
+## Device discovery
+
+IGrill devices can be found using the `igrill_ble_listener`
+
+To find out your device’s MAC address, add the following to your ESPHome configuration:
+
+```yaml
+esp32_ble_tracker:
+igrill_ble_listener:
+```
+
+The device will then listen for nearby devices, and display a message like this one:
+
+```
+[I][igrill_ble_listener:029]: Found IGrill device Name: iGrill_mini (MAC: 70:91:8F:XX:XX:XX)
+```
+
+Once the device is found, take note of the device MAC address. You will use it when configuring a sensor below.
+You can now remove the `igrill_ble_listener` device tracker from your configuration.
+
+## Supported Devices
+In principle, all IGrill devices, including the Pulse 2000 are supported, but I do not own all of them. The ones with a checkmark in the list are confirmed working IGrill models:
+
+- [x] IGrill mini
+- [ ] IGrill mini V2
+- [x] IGrill V2 - Thanks to [stogs](https://github.com/stogs) for verifying
+- [X] IGrill V202
+- [x] IGrill V3
+- [x] Weber Pulse 1000 Thanks to [samvanh](https://github.com/samvanh) for verifying
+- [x] Weber Pulse 2000 Thanks to [PaulAntonDeen](https://github.com/PaulAntonDeen) for testing and verifying
+- [x] iDevices LLC Kitchen Bleutooth Smart Thermometer Thanks to [Burak](https://github.com/108burakk) for testing and verifying
+
+
+If you own one of the untested models, I would be thankfull if you create a ticket so we can get it confirmed working.
+
+## Configuration example
+
+```yaml
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: 70:91:8F:XX:XX:XX
+    id: igrill_device
+
+sensor:
+  - platform: igrill
+    ble_client_id: igrill_device
+    update_interval: 30s # default
+    battery_level:
+      name: "IGrill v3 battery"
+    temperature_probe1:
+      name: "IGrill v3 temp probe 1"
+    temperature_probe2:
+      name: "IGrill v3 temp probe 2"
+    temperature_probe3:
+      name: "IGrill v3 temp probe 3"
+    temperature_probe4:
+      name: "IGrill v3 temp probe 4"
+```
+## Configuration variables
+- **update_interval** (*Optional,* [Time](https://esphome.io/guides/configuration-types.html#config-time)) The interval between each read and publish of sensor values. Defaults to "30s"
+- **send_value_when_unplugged** (*Optional,* boolean): When set to `false`, the component will skip publishing for probes that are unplugged. Defaults to `true`
+- **unplugged_probe_value** (*Optional,* integer): The value to publish when a probe is disconnected, and **send_value_when_unplugged** is `true`. Defaults to 0
+
+## Available Sensors
+- **temperature_probe1** (*Optional) The reported temperature of probe 1
+- **temperature_probe2** (*Optional) The reported temperature of probe 2
+- **temperature_probe3** (*Optional) The reported temperature of probe 3
+- **temperature_probe4** (*Optional) The reported temperature of probe 4
+- **pulse_heating_actual1** (*Optional) The reported temperature of the left heating element on a Pulse 2000
+- **pulse_heating_actual2** (*Optional) The reported temperature of the right heating element on a Pulse 2000
+- **pulse_heating_setpoint1** (*Optional) The reported setpoint of the left heating element on a Pulse 2000
+- **pulse_heating_setpoint2** (*Optional) The reported setpoint of the right heating element on a Pulse 2000
+- **propane_level** (*Optional) The propane level on a V3 device
+- **battery_level** (*Optional) The battery level of the igrill device
+
+## Additional diagnostic connection sensors
+If you require HA sensors to indicate if a BT connection to the iGrill device is established (e.g. for conditional cards), you can use the automations included in `ble_client` to update a template binary sensor like this:
+
+```yaml
+ble_client:
+  - mac_address: 70:91:8F:XX:XX:XX
+    id: igrillv3
+    on_connect:
+      then:
+        - binary_sensor.template.publish:
+            id: v3_connection_bin
+            state: ON
+    on_disconnect:
+      then:
+        - binary_sensor.template.publish:
+            id: v3_connection_bin
+            state: OFF
+
+binary_sensor:
+  - platform: template
+    name: "iGrill V3 connection status"
+    id: v3_connection_bin
+    device_class: connectivity
+    entity_category: diagnostic
+```
+
+## Temperature unit:
+The temperature unit of the sensors are set to the unit reported by the iGrill device
+
+## Troubleshooting
+
+If the ESPHome device can't connect to your IGrill, please make sure that you disconnect it from any other devices you have used in the past. IGrill devices can't maintain multiple connections.
+
+The same goes the other way around. If you use this component to connect to your IGrill, you can not use the mobile app at the same time.
+
+Also, you can turn the log level up to Verbose to see more diagnostics:
+
+```yaml
+logger:
+  level: VERBOSE
+```
+
+## Disclaimer
+This is a work in progress, and some things do not work yet.
+
+What works:
+- MAC address discovery with `igrill_ble_listener`
+- Connection and authorization
+- Detection of model and number of probes
+- Publishing of probe temperatures
+- Publishing of Pulse 2000 heating element values
+- Publishing of battery level
+- Publishing of propane level (Untested)
+- Use correct temperature unit (read from device)
+
+TODO:
+- Publish firmware version
+- Read and write temperature setpoint on probes
+- Set temperature unit (write to device)
