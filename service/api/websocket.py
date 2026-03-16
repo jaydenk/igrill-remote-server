@@ -126,12 +126,16 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     client = WebSocketClient(ws)
     hub.add(client)
 
+    peer = request.remote or "unknown"
+    LOG.info("WebSocket client connected from %s (total: %d)", peer, len(hub.clients))
+
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
                 except json.JSONDecodeError:
+                    LOG.warning("Invalid JSON from %s", peer)
                     await send_error(ws, "invalid_json", "Message must be valid JSON.")
                     continue
 
@@ -147,6 +151,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 msg_type = data.get("type")
                 request_id = data.get("requestId")
                 payload = data.get("payload") or {}
+
+                LOG.info("WS recv from %s: type=%s requestId=%s", peer, msg_type, request_id)
 
                 # -- status_request ----------------------------------------
                 if msg_type == "status_request":
@@ -200,6 +206,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         "sessionTimeoutSeconds": session_state.get("session_timeout_seconds"),
                         "activeTargets": active_targets,
                     }
+                    LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
+                             peer, device_state, has_data, session_state.get("current_session_id"))
                     await send_envelope(ws, "status", status_payload, request_id=request_id)
 
                 # -- sessions_request --------------------------------------
@@ -433,8 +441,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     )
 
             elif msg.type == web.WSMsgType.ERROR:
-                LOG.debug("WebSocket error: %s", ws.exception())
+                LOG.warning("WebSocket error from %s: %s", peer, ws.exception())
     finally:
+        LOG.info("WebSocket client disconnected: %s (remaining: %d)", peer, len(hub.clients) - 1)
         await hub.remove(client)
 
     return ws
@@ -452,6 +461,9 @@ async def broadcast_readings(app: web.Application) -> None:
     while True:
         reading = await store.next_reading()
         message = make_envelope("reading", reading["payload"], seq=reading.get("seq"))
+        client_count = len(hub.clients)
+        if client_count > 0:
+            LOG.debug("Broadcasting reading to %d client(s) seq=%s", client_count, reading.get("seq"))
         hub.broadcast(message, critical=False)
 
 
