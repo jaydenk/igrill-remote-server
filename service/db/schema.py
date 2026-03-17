@@ -1,8 +1,11 @@
 """Database schema definitions and initialisation."""
 
+import logging
 import sqlite3
 
 import aiosqlite
+
+LOG = logging.getLogger("igrill.db")
 
 SCHEMA_VERSION = 1
 
@@ -79,8 +82,50 @@ CREATE INDEX IF NOT EXISTS idx_session_targets_session ON session_targets(sessio
 """
 
 
+async def _drop_legacy_schema(conn: aiosqlite.Connection) -> None:
+    """Detect and remove the pre-normalisation schema.
+
+    The original HistoryStore created ``sessions`` with
+    ``id INTEGER PRIMARY KEY AUTOINCREMENT``.  The current schema uses
+    ``id TEXT PRIMARY KEY`` (UUID hex strings).  Because
+    ``CREATE TABLE IF NOT EXISTS`` silently keeps the existing table,
+    the old INTEGER column persists and causes ``datatype mismatch``
+    errors when inserting text IDs.
+
+    This function checks for the legacy column type and drops all
+    incompatible tables so they can be recreated cleanly.
+    """
+    try:
+        cursor = await conn.execute("PRAGMA table_info(sessions)")
+        columns = await cursor.fetchall()
+    except Exception:
+        return  # Table doesn't exist yet — nothing to do
+
+    for col in columns:
+        # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
+        if col[1] == "id" and col[2].upper() == "INTEGER":
+            LOG.warning(
+                "Detected legacy schema (sessions.id INTEGER). "
+                "Dropping incompatible tables to upgrade."
+            )
+            await conn.executescript(
+                """
+                DROP TABLE IF EXISTS readings;
+                DROP TABLE IF EXISTS session_targets;
+                DROP TABLE IF EXISTS session_devices;
+                DROP TABLE IF EXISTS device_readings;
+                DROP TABLE IF EXISTS probe_readings;
+                DROP TABLE IF EXISTS sessions;
+                DROP TABLE IF EXISTS devices;
+                DROP TABLE IF EXISTS schema_version;
+                """
+            )
+            return
+
+
 async def init_db(conn: aiosqlite.Connection) -> None:
     """Create all tables if they don't exist and record schema version."""
+    await _drop_legacy_schema(conn)
     await conn.executescript(_SCHEMA_SQL)
 
     cursor = await conn.execute(

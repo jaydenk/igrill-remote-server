@@ -108,3 +108,44 @@ async def test_indexes_created(tmp_db):
         assert "idx_device_readings_session" in indexes
         assert "idx_session_devices_session" in indexes
         assert "idx_session_targets_session" in indexes
+
+
+@pytest.mark.asyncio
+async def test_legacy_schema_upgrade(tmp_db):
+    """Verify that init_db detects and replaces the old INTEGER PK schema."""
+    async with aiosqlite.connect(tmp_db) as conn:
+        # Create the legacy sessions table (INTEGER PRIMARY KEY)
+        await conn.execute(
+            """
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                name TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                start_reason TEXT,
+                end_reason TEXT
+            )
+            """
+        )
+        await conn.execute(
+            "INSERT INTO sessions (address, started_at, start_reason) "
+            "VALUES ('AA:BB:CC', '2026-01-01T00:00:00Z', 'user')"
+        )
+        await conn.commit()
+
+        # init_db should drop the old table and create the new one
+        await init_db(conn)
+
+        # Verify sessions.id is now TEXT
+        cursor = await conn.execute("PRAGMA table_info(sessions)")
+        columns = await cursor.fetchall()
+        id_col = [c for c in columns if c[1] == "id"][0]
+        assert id_col[2].upper() == "TEXT"
+
+        # Verify we can insert a UUID text ID
+        await conn.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) "
+            "VALUES ('abcdef1234567890abcdef1234567890', '2026-01-01T00:00:00Z', 'user')"
+        )
+        await conn.commit()
