@@ -12,6 +12,7 @@ service/
   logging_setup.py # Structured logging setup with per-subsystem level control
   __init__.py      # Package marker
   main.py          # App factory and entry point (thin ~90-line module)
+  metrics.py       # Lightweight Prometheus-compatible metrics registry (no external deps)
   ble/
     protocol.py       # BLE protocol constants, model definitions, and detection
     connection_state.py # ConnectionStateMachine — BLE connection state machine with exponential backoff
@@ -47,6 +48,7 @@ tests/
   test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
   test_connection_state.py # ConnectionStateMachine tests (transitions, backoff, callbacks)
   test_logging.py    # Structured logging setup tests (global level, subsystem overrides, runtime updates)
+  test_metrics.py    # Prometheus metrics registry tests (counters, gauges, labels, rendering)
 ```
 
 ## Quick Start (Docker Compose)
@@ -106,7 +108,7 @@ To override defaults with a file, copy `env.example` to `.env` and edit values.
 
 ## API
 - `GET /` serves the web dashboard — a single-page monitoring UI showing real-time device status, probe temperatures, and session information via WebSocket.
-- `GET /metrics` returns the latest readings for all discovered devices.
+- `GET /metrics` returns Prometheus text exposition format metrics (counters, gauges, labelled metrics).
 - `GET /history` returns all persisted sessions and readings (optional `?mac=70:91:8F:...`).
 - `GET /health` returns a lightweight health check with uptime, device counts, and active session ID.
 

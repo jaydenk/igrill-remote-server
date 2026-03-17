@@ -9,6 +9,7 @@ from aiohttp import web
 
 from service.config import Config
 from service.logging_setup import setup_logging
+from service.metrics import MetricsRegistry
 from service.models.device import DeviceStore
 from service.history.store import HistoryStore
 from service.ble.device_manager import DeviceManager
@@ -27,12 +28,14 @@ def create_app(config: Config) -> web.Application:
     history = HistoryStore(config.db_path, config.reconnect_grace)
     evaluator = AlertEvaluator()
     hub = WebSocketHub()
+    metrics = MetricsRegistry()
 
     app["config"] = config
     app["store"] = store
     app["history"] = history
     app["evaluator"] = evaluator
     app["hub"] = hub
+    app["metrics"] = metrics
     app["start_time"] = time.monotonic()
 
     setup_routes(app)

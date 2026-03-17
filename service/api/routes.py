@@ -19,7 +19,11 @@ LOG = logging.getLogger("igrill.http")
 
 
 async def metrics_handler(request: web.Request) -> web.Response:
-    """Return a JSON snapshot of all known devices."""
+    """Serve Prometheus text format metrics, or fall back to JSON device snapshot."""
+    metrics = request.app.get("metrics")
+    if metrics:
+        return web.Response(text=metrics.render(), content_type="text/plain")
+    # Fallback: return device snapshot as JSON (backwards compat)
     store: DeviceStore = request.app["store"]
     snapshot = await store.snapshot()
     return web.json_response(
