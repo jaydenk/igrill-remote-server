@@ -187,12 +187,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
                     session_state = await history.get_session_state()
 
-                    # Fetch active targets for the current session
+                    # Fetch active targets and devices for the current session
                     active_targets: list[dict[str, Any]] = []
+                    session_devices: list[dict[str, Any]] = []
                     current_sid = session_state.get("current_session_id")
                     if current_sid is not None:
-                        targets = await history.get_targets(int(current_sid))
+                        targets = await history.get_targets(current_sid)
                         active_targets = [t.to_dict() for t in targets]
+                        session_devices = await history.get_session_devices(current_sid)
 
                     status_payload: dict[str, Any] = {
                         "hasData": has_data,
@@ -205,6 +207,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         "lastSessionId": session_state.get("last_session_id"),
                         "sessionTimeoutSeconds": session_state.get("session_timeout_seconds"),
                         "activeTargets": active_targets,
+                        "sessionDevices": session_devices,
                     }
                     LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
                              peer, device_state, has_data, session_state.get("current_session_id"))
@@ -252,12 +255,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         if limit is not None:
                             limit = int(limit)
                         if session_id is not None:
-                            session_id = int(session_id)
+                            session_id = str(session_id)
                         chunk_size = int(chunk_size)
                     except (TypeError, ValueError):
                         await send_error(
                             ws, "invalid_payload",
-                            "limit, sessionId, and chunkSize must be integers.",
+                            "limit and chunkSize must be integers.",
                             request_id,
                         )
                         continue
@@ -300,9 +303,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         )
                         continue
 
-                    # Parse optional targets and device address from payload
+                    # Parse optional targets from payload
                     raw_targets = payload.get("targets", [])
-                    device_address = payload.get("deviceAddress")
                     targets: list[TargetConfig] = []
                     try:
                         for raw in raw_targets:
@@ -315,9 +317,32 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         )
                         continue
 
-                    now_ts = now_iso_utc()
-                    sensor_id = device_address or "all"
-                    session_info = await history.force_new_session(now_ts, sensor_id, "user")
+                    # Accept deviceAddresses (array) or fall back to deviceAddress (string)
+                    device_addresses: list[str] = payload.get("deviceAddresses", [])
+                    if not device_addresses:
+                        single = payload.get("deviceAddress")
+                        if single:
+                            device_addresses = [single]
+
+                    # If still empty, use all currently connected devices
+                    if not device_addresses:
+                        snapshot = await store.snapshot()
+                        device_addresses = [
+                            addr for addr, dev in snapshot.items()
+                            if dev.get("connected")
+                        ]
+
+                    if not device_addresses:
+                        await send_error(
+                            ws, "no_devices",
+                            "No devices specified and none are currently connected.",
+                            request_id=request_id,
+                        )
+                        continue
+
+                    session_info = await history.start_session(
+                        addresses=device_addresses, reason="user"
+                    )
 
                     if session_info.get("end_event"):
                         await store.publish_event(make_envelope("session_end", session_info["end_event"]))
@@ -325,9 +350,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
                     new_session_id = session_info["session_id"]
 
-                    # Save and register targets
+                    # Save and register targets per device address
                     if targets:
-                        await history.save_targets(new_session_id, targets)
+                        for addr in device_addresses:
+                            await history.save_targets(new_session_id, addr, targets)
                         evaluator.set_targets(new_session_id, targets)
 
                     # Update device store with new session info
@@ -343,6 +369,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         "ok": True,
                         "sessionId": new_session_id,
                         "sessionStartTs": session_info["session_start_ts"],
+                        "devices": device_addresses,
                         "targets": [t.to_dict() for t in targets],
                     }
                     await send_envelope(ws, "session_start_ack", response_payload, request_id=request_id)
@@ -359,8 +386,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         )
                         continue
 
-                    now_ts = now_iso_utc()
-                    result = await history.end_current_session(now_ts, "user")
+                    result = await history.end_session(reason="user")
 
                     if result is None:
                         await send_error(
@@ -370,7 +396,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         continue
 
                     ended_session_id = result["sessionId"]
-                    evaluator.clear_session(int(ended_session_id))
+                    evaluator.clear_session(ended_session_id)
 
                     await store.publish_event(make_envelope("session_end", result))
 
@@ -397,6 +423,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         continue
 
                     raw_targets = payload.get("targets", [])
+                    target_address = payload.get("deviceAddress")
                     targets = []
                     try:
                         for raw in raw_targets:
@@ -418,8 +445,18 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         )
                         continue
 
-                    sid = int(current_sid)
-                    await history.update_targets(sid, targets)
+                    sid = current_sid
+
+                    # Determine which device address to update targets for
+                    if not target_address:
+                        # Fall back to first device in session
+                        session_devices = await history.get_session_devices(sid)
+                        if session_devices:
+                            target_address = session_devices[0]["address"]
+                        else:
+                            target_address = "all"
+
+                    await history.update_targets(sid, target_address, targets)
                     evaluator.set_targets(sid, targets)
 
                     await send_envelope(
@@ -428,6 +465,56 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             "ok": True,
                             "sessionId": sid,
                             "targets": [t.to_dict() for t in targets],
+                        },
+                        request_id=request_id,
+                    )
+
+                # -- session_add_device_request -----------------------------
+                elif msg_type == "session_add_device_request":
+                    if not request_id:
+                        await send_error(ws, "missing_request_id", "session_add_device_request requires requestId.")
+                        continue
+                    if not authorized:
+                        await send_error(
+                            ws, "unauthorized", "Not allowed to modify sessions",
+                            request_id=request_id,
+                        )
+                        continue
+
+                    add_address = payload.get("deviceAddress")
+                    if not add_address:
+                        await send_error(
+                            ws, "invalid_payload",
+                            "deviceAddress is required.",
+                            request_id=request_id,
+                        )
+                        continue
+
+                    session_state = await history.get_session_state()
+                    current_sid = session_state.get("current_session_id")
+                    if current_sid is None:
+                        await send_error(
+                            ws, "no_active_session", "No session is currently active.",
+                            request_id=request_id,
+                        )
+                        continue
+
+                    await history.add_device_to_session(current_sid, add_address)
+
+                    # Broadcast device_joined event
+                    device_joined_payload: dict[str, Any] = {
+                        "sessionId": current_sid,
+                        "deviceAddress": add_address,
+                        "joinedAt": now_iso_utc(),
+                    }
+                    await store.publish_event(make_envelope("device_joined", device_joined_payload))
+
+                    await send_envelope(
+                        ws, "session_add_device_ack",
+                        {
+                            "ok": True,
+                            "sessionId": current_sid,
+                            "deviceAddress": add_address,
                         },
                         request_id=request_id,
                     )

@@ -590,6 +590,44 @@ class HistoryStore:
             self._conn.commit()
 
     # ------------------------------------------------------------------
+    # Query helpers
+    # ------------------------------------------------------------------
+
+    async def has_history(self) -> bool:
+        """Return True if there is at least one recorded reading."""
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) as cnt FROM probe_readings LIMIT 1"
+            ).fetchone()
+            return row["cnt"] > 0
+
+    async def latest_ts(self) -> Optional[str]:
+        """Return the most recent recorded_at timestamp, or None."""
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(recorded_at) as ts FROM probe_readings"
+            ).fetchone()
+            return row["ts"] if row else None
+
+    async def is_device_in_session(self, address: str) -> bool:
+        """Check whether a device is part of the current active session
+        and has not left."""
+        async with self._lock:
+            if self._current_session_id is None:
+                return False
+            row = self._conn.execute(
+                "SELECT 1 FROM session_devices "
+                "WHERE session_id = ? AND address = ? AND left_at IS NULL",
+                (self._current_session_id, address),
+            ).fetchone()
+            return row is not None
+
+    async def get_current_session_id(self) -> Optional[str]:
+        """Return the current session ID, or None if no session is active."""
+        async with self._lock:
+            return self._current_session_id
+
+    # ------------------------------------------------------------------
     # Disconnect tracking
     # ------------------------------------------------------------------
 

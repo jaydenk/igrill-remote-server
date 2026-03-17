@@ -88,7 +88,6 @@ class DeviceWorker:
         self._model: Optional[ModelInfo] = None
         self._stop = asyncio.Event()
         self._connected_logged = False
-        self._session_id: Optional[int] = None
         self._seq = 0
 
     # -- Public interface ---------------------------------------------------
@@ -119,10 +118,21 @@ class DeviceWorker:
                     self._model = detect_model(services)
                     await self._update_model_state()
                     await self._authenticate(client, services)
+
+                    # If a session is active, mark this device as rejoined
+                    session_id = await self.history.get_current_session_id()
+                    if session_id is not None and await self.history.is_device_in_session(self.address):
+                        await self.history.device_rejoined_session(session_id, self.address)
+
                     await self._poll_loop(client, services)
+
+                    # On disconnect: mark device as left if session is active
+                    session_id = await self.history.get_current_session_id()
+                    if session_id is not None and await self.history.is_device_in_session(self.address):
+                        await self.history.device_left_session(session_id, self.address)
+
                     await self.history.note_disconnect(self.address, now_iso_utc())
                     await self.store.upsert(self.address, connected=False)
-                    self._session_id = None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -132,6 +142,16 @@ class DeviceWorker:
                     connected=False,
                     error=str(exc),
                 )
+
+                # On error disconnect: mark device as left if session is active
+                session_id = await self.history.get_current_session_id()
+                if session_id is not None:
+                    try:
+                        if await self.history.is_device_in_session(self.address):
+                            await self.history.device_left_session(session_id, self.address)
+                    except Exception:
+                        LOG.debug("Failed to mark device %s as left on error", self.address)
+
                 await self.history.note_disconnect(self.address, now_iso_utc())
                 await asyncio.sleep(3)
 
@@ -175,21 +195,21 @@ class DeviceWorker:
             probe_uuids = PROBE_TEMPERATURE_UUIDS[: self._model.probe_count]
         while client.is_connected and not self._stop.is_set():
             payload = await self._read_metrics(client, services, probe_uuids)
-            now_ts = now_iso_utc()
-            session_info = await self.history.ensure_session_for_reading(now_ts, self.address)
-            session_id = session_info["session_id"]
-            session_start_ts = session_info["session_start_ts"]
-            self._session_id = session_id
+
+            # Get current session state (may be None if no session is active)
+            session_state = await self.history.get_session_state()
+            session_id = session_state.get("current_session_id")
+            session_start_ts = session_state.get("current_session_start_ts")
+
+            # Always update device store with latest readings (live dashboard)
             await self.store.upsert(
                 self.address,
                 session_id=session_id,
                 session_start_ts=session_start_ts,
                 **payload,
             )
-            if session_info.get("end_event"):
-                await self.store.publish_event(_make_envelope("session_end", session_info["end_event"]))
-            if session_info.get("start_event"):
-                await self.store.publish_event(_make_envelope("session_start", session_info["start_event"]))
+
+            # Always publish readings to WebSocket (live dashboard works without session)
             self._seq += 1
             device_entry = await self.store.get_device(self.address)
             if device_entry is None:
@@ -206,22 +226,27 @@ class DeviceWorker:
                     "payload": reading_payload,
                 }
             )
-            await self.history.record_reading(
-                session_id,
-                self.address,
-                payload,
-                reading_payload,
-                self._seq,
-                session_start_ts,
-            )
 
-            # Evaluate alert targets and publish any resulting events
-            probes: List[Dict[str, Any]] = payload.get("probes", [])  # type: ignore[assignment]
-            if probes and session_id is not None:
-                alert_events = self._evaluator.evaluate(session_id, probes, self.address)
-                for alert_evt in alert_events:
-                    envelope = _make_envelope(alert_evt["type"], alert_evt["payload"])
-                    await self.store.publish_event(envelope)
+            # Only record to DB and evaluate alerts when a session is active
+            # and this device is part of it
+            if session_id is not None and await self.history.is_device_in_session(self.address):
+                probes: List[Dict[str, Any]] = payload.get("probes", [])  # type: ignore[assignment]
+                await self.history.record_reading(
+                    session_id=session_id,
+                    address=self.address,
+                    seq=self._seq,
+                    probes=probes,
+                    battery=payload.get("battery_percent"),  # type: ignore[arg-type]
+                    propane=payload.get("propane_percent"),  # type: ignore[arg-type]
+                    heating=payload.get("pulse"),  # type: ignore[arg-type]
+                )
+
+                # Evaluate alert targets and publish any resulting events
+                if probes:
+                    alert_events = self._evaluator.evaluate(session_id, probes, self.address)
+                    for alert_evt in alert_events:
+                        envelope = _make_envelope(alert_evt["type"], alert_evt["payload"])
+                        await self.store.publish_event(envelope)
 
             await asyncio.sleep(self.poll_interval)
 

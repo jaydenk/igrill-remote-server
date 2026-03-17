@@ -139,26 +139,30 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 ```
 
 **Client request types:**
-- `status_request` -- returns device state, session info, sample rate, and active targets.
+- `status_request` -- returns device state, session info, sample rate, active targets, and session devices.
 - `sessions_request` -- lists recent sessions (`payload.limit` defaults to 20, max 100).
 - `history_request` -- streams history chunks (`sinceTs`, `untilTs`, `limit`, `sessionId`, `chunkSize`).
-- `session_start_request` -- starts a new session (requires authorisation). Accepts optional `targets` array and `deviceAddress`.
+- `session_start_request` -- starts a new user-initiated session (requires authorisation). Accepts optional `targets` array and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included.
 - `session_end_request` -- ends the current session (requires authorisation).
-- `target_update_request` -- updates targets for the current session (requires authorisation).
+- `session_add_device_request` -- adds a device to the active session mid-cook (requires authorisation). Requires `deviceAddress` in payload.
+- `target_update_request` -- updates targets for the current session (requires authorisation). Accepts optional `deviceAddress` to scope targets to a specific device.
 
 **Server response types:**
-- `status` -- response to `status_request` with device state, session info, sample rate, and active targets.
+- `status` -- response to `status_request` with device state, session info, sample rate, active targets, and session devices.
 - `sessions_list` -- response to `sessions_request` with recent session summaries.
 - `history_chunk` / `history_end` -- streamed response to `history_request`.
-- `session_start_ack` / `session_end_ack` / `target_update_ack` -- acknowledgements for session control requests.
+- `session_start_ack` / `session_end_ack` / `target_update_ack` / `session_add_device_ack` -- acknowledgements for session control requests.
 
 **Server broadcast types:**
-- `reading` -- pushed on each poll cycle with latest probe data.
+- `reading` -- pushed on each poll cycle with latest probe data (always broadcast, regardless of session state).
 - `session_start` / `session_end` -- broadcast when sessions change.
+- `device_joined` -- broadcast when a device is added to an active session.
 - `target_approaching` -- probe temperature crossed the pre-alert threshold.
 - `target_reached` -- probe temperature hit the target.
 - `target_exceeded` -- probe temperature went above the target.
 - `target_reminder` -- periodic nudge while temperature remains above target.
+
+**Session model:** Sessions are user-initiated only -- no session is auto-created on startup or when a device connects. The device worker always polls BLE and broadcasts live readings to WebSocket clients, but only records to the database and evaluates alert targets when a session is active and the device is part of it. When a device disconnects during a session, it is marked as having left; on reconnect, it is automatically rejoined.
 
 Note: `curl` does not support WebSockets. Use a client like `websocat` or `wscat`, or an iOS `URLSessionWebSocketTask`.
 

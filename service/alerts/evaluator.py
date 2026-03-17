@@ -27,16 +27,16 @@ class AlertEvaluator:
     """
 
     def __init__(self) -> None:
-        self._state: dict[tuple[int, int], ProbeAlertState] = {}  # (session_id, probe_index)
-        self._targets: dict[int, list[TargetConfig]] = {}  # session_id -> targets
+        self._state: dict[tuple[str, int], ProbeAlertState] = {}  # (session_id, probe_index)
+        self._targets: dict[str, list[TargetConfig]] = {}  # session_id -> targets
 
-    def set_targets(self, session_id: int, targets: list[TargetConfig]) -> None:
+    def set_targets(self, session_id: str, targets: list[TargetConfig]) -> None:
         """Register (or replace) the target configs for *session_id*."""
         self._targets[session_id] = targets
         for t in targets:
             self._state[(session_id, t.probe_index)] = ProbeAlertState()
 
-    def clear_session(self, session_id: int) -> None:
+    def clear_session(self, session_id: str) -> None:
         """Remove all targets and state for *session_id*."""
         self._targets.pop(session_id, None)
         keys = [k for k in self._state if k[0] == session_id]
@@ -45,7 +45,7 @@ class AlertEvaluator:
 
     def evaluate(
         self,
-        session_id: int,
+        session_id: str,
         probes: list[dict[str, Any]],
         sensor_id: str,
     ) -> list[dict[str, Any]]:
