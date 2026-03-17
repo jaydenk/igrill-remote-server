@@ -1424,10 +1424,10 @@
       var ctx = u.ctx;
       ctx.save();
       var yScale = u.scales.y;
-      var plotLeft = u.bbox.left / devicePixelRatio;
-      var plotTop = u.bbox.top / devicePixelRatio;
-      var plotWidth = u.bbox.width / devicePixelRatio;
-      var plotHeight = u.bbox.height / devicePixelRatio;
+      var plotLeft = u.bbox.left;
+      var plotTop = u.bbox.top;
+      var plotWidth = u.bbox.width;
+      var plotHeight = u.bbox.height;
 
       for (var t = 0; t < targetLines.length; t++) {
         var tgt = targetLines[t];
@@ -2610,10 +2610,10 @@
     function drawTargetLines(u) {
       var ctx = u.ctx;
       ctx.save();
-      var plotLeft = u.bbox.left / devicePixelRatio;
-      var plotTop = u.bbox.top / devicePixelRatio;
-      var plotWidth = u.bbox.width / devicePixelRatio;
-      var plotHeight = u.bbox.height / devicePixelRatio;
+      var plotLeft = u.bbox.left;
+      var plotTop = u.bbox.top;
+      var plotWidth = u.bbox.width;
+      var plotHeight = u.bbox.height;
 
       for (var t = 0; t < targetLines.length; t++) {
         var tgt = targetLines[t];
