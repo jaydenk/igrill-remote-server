@@ -1,4 +1,9 @@
-"""BLE protocol constants, model definitions, and detection logic for iGrill devices."""
+"""BLE protocol constants for iGrill devices.
+
+BLE GATT UUIDs and model definitions originally reverse-engineered by
+Bendik Wang Andreassen for the esphome-igrill project:
+https://github.com/bendikwa/esphome-igrill
+"""
 
 from __future__ import annotations
 
