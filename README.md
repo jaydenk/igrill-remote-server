@@ -21,23 +21,16 @@ A standalone BLE polling service for Weber iGrill thermometer devices. It contin
 
 ### Docker Compose (recommended)
 
-The service is designed to sit behind a [Traefik](https://traefik.io/) reverse proxy. The compose file declares an external `proxy` network and Traefik labels, so ensure your Traefik instance is running and the network exists:
-
 ```sh
-docker network create proxy   # one-time setup, if not already created
 cp env.example .env            # edit values as needed
 docker compose up -d --build
-curl https://igrill.<your-hostname>/health
+curl http://localhost:39120/health
 ```
 
-If you need direct port access for local development, add a `ports` section via a compose override:
+By default the container exposes the port directly. To place the service behind a [Traefik](https://traefik.io/) reverse proxy instead, uncomment the Traefik labels and `proxy` network in `docker-compose.yml`, comment out the `ports` section, and ensure the external network exists:
 
-```yaml
-# docker-compose.override.yml
-services:
-  igrill:
-    ports:
-      - "${IGRILL_PORT:-39120}:${IGRILL_PORT:-39120}"
+```sh
+docker network create proxy   # one-time setup
 ```
 
 ### Local Development
@@ -73,6 +66,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `IGRILL_LOG_LEVEL_ALERT` | *(global)* | Override log level for the alert subsystem (`igrill.alert`). |
 | `IGRILL_LOG_LEVEL_HTTP` | *(global)* | Override log level for the HTTP subsystem (`igrill.http`). |
 | `IGRILL_SESSION_TOKEN` | *(empty)* | If set, requires `Authorization: Bearer <token>` on WebSocket session-control messages. |
+| `IGRILL_CORS_ORIGIN` | *(empty)* | If set, adds CORS `Access-Control-Allow-Origin` headers (e.g. `*` for development). A warning is logged if set to `*`. |
 
 ## API Reference
 
@@ -82,9 +76,8 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | --- | --- | --- |
 | `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls, BLE state indicators, live temperature charts (uPlot), past session browsing with full-timeline charts and summary statistics, and runtime log level management. |
 | `GET` | `/health` | Health check with uptime, device counts, active session ID, poll interval, and scan interval. |
-| `GET` | `/metrics` | Prometheus text exposition format metrics (counters, gauges, labelled). |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
-| `GET` | `/api/sessions/{id}` | Session detail with devices, targets, and readings. |
+| `GET` | `/api/sessions/{id}` | Session detail with devices, targets, and readings. Returns 404 if the session does not exist. |
 | `PUT` | `/api/config/log-levels` | Runtime log level update (requires authorisation). |
 
 ### WebSocket Protocol (v2)
@@ -101,7 +94,7 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | --- | --- |
 | `status_request` | Returns device state, session info, sample rate, active targets, and session devices. |
 | `sessions_request` | Lists recent sessions (`payload.limit` defaults to 20, max 100). |
-| `history_request` | Streams history chunks (`sinceTs`, `untilTs`, `limit`, `sessionId`, `chunkSize`). |
+| `history_request` | Streams history chunks (`sinceTs`, `untilTs`, `limit` (max 10,000), `sessionId`, `chunkSize`). |
 | `session_start_request` | Starts a new user-initiated session. Accepts optional `targets` array and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
 | `session_end_request` | Ends the current session. Requires authorisation. |
 | `session_add_device_request` | Adds a device to the active session mid-cook. Requires `deviceAddress` in payload. Requires authorisation. |
@@ -150,11 +143,11 @@ A single session can include multiple iGrill devices. Devices can be added to an
 
 ### Normalised Data Layer
 
-Session data is stored in a normalised SQLite schema: sessions, session-device membership, per-probe readings, and per-device targets are all separate tables linked by foreign keys with UUID session identifiers.
+Session data is stored in a normalised SQLite schema: sessions, session-device membership, per-probe readings, and per-device targets are all separate tables linked by foreign keys with UUID session identifiers. Schema changes are applied automatically via a sequential migration runner on startup.
 
 ### Post-Session Downsampling
 
-When a session ends, the raw readings are downsampled to reduce storage. This preserves the overall shape of the temperature curve while significantly reducing database size for long cooks.
+When a session ends, the raw readings are downsampled to reduce storage. Both probe readings and device readings (battery, propane, heating) are cleaned up together so that historical queries remain consistent. This preserves the overall shape of the temperature curve while significantly reducing database size for long cooks.
 
 ### Device Manager Health Monitoring
 
@@ -168,7 +161,6 @@ service/
   config.py              # Centralised configuration from environment variables
   logging_setup.py       # Structured logging with per-subsystem level control
   main.py                # App factory and entry point
-  metrics.py             # Prometheus-compatible metrics registry (no external deps)
   alerts/
     evaluator.py         # Checks probes against targets, emits alert events
   api/
@@ -182,7 +174,7 @@ service/
     device_manager.py    # Scans for iGrill devices and spawns/monitors workers
   db/
     schema.py            # Normalised database schema definitions and init_db()
-    migrations.py        # Schema migration runner
+    migrations.py        # Sequential schema migration runner
   history/
     downsampler.py       # Post-session reading downsampling
     store.py             # SQLite-backed sessions, readings, and targets
@@ -201,10 +193,8 @@ tests/
   test_config_new.py     # Extended configuration tests
   test_connection_state.py  # ConnectionStateMachine tests
   test_downsampler.py    # Post-session downsampling tests
-  test_history.py        # HistoryStore legacy API tests
-  test_history_store.py  # HistoryStore normalised API tests
+  test_history_store.py  # HistoryStore tests
   test_logging.py        # Structured logging tests
-  test_metrics.py        # Prometheus metrics registry tests
   test_models.py         # Data models tests
   test_protocol.py       # BLE protocol module tests
   test_integration.py    # Full-server integration tests
@@ -217,7 +207,7 @@ tests/
 ### Running Tests
 
 ```sh
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m pytest tests/ -v
 ```
 
@@ -226,6 +216,19 @@ python -m pytest tests/ -v
 ```sh
 docker compose build
 docker compose up -d
+```
+
+## CI/CD
+
+A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`:
+
+1. **Test** — installs dependencies and runs `pytest` on Ubuntu.
+2. **Docker** — on merge to `main`, builds and pushes the Docker image to `ghcr.io/jaydenk/igrill-remote-server:latest` (and a SHA-tagged variant).
+
+To pull the pre-built image instead of building locally:
+
+```sh
+docker pull ghcr.io/jaydenk/igrill-remote-server:latest
 ```
 
 ## BLE Host Requirements

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import time
 
@@ -9,7 +10,6 @@ from aiohttp import web
 
 from service.config import Config
 from service.logging_setup import setup_logging
-from service.metrics import MetricsRegistry
 from service.models.device import DeviceStore
 from service.history.store import HistoryStore
 from service.ble.device_manager import DeviceManager
@@ -20,22 +20,56 @@ from service.web.dashboard import setup_dashboard
 
 LOG = logging.getLogger("igrill")
 
+_CORS_ORIGIN = os.getenv("IGRILL_CORS_ORIGIN", "")
+
+
+# ---------------------------------------------------------------------------
+# CORS middleware (permissive for same-origin; configurable if needed)
+# ---------------------------------------------------------------------------
+
+
+@web.middleware
+async def cors_middleware(request: web.Request, handler) -> web.StreamResponse:
+    """Add CORS headers.  By default only the same origin is permitted;
+    set ``IGRILL_CORS_ORIGIN`` to override (e.g. ``*`` for development)."""
+    if request.method == "OPTIONS":
+        response = web.Response()
+    else:
+        response = await handler(request)
+    if _CORS_ORIGIN:
+        response.headers["Access-Control-Allow-Origin"] = _CORS_ORIGIN
+        response.headers["Access-Control-Allow-Methods"] = "GET, PUT, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    return response
+
+
+def _warn_cors_wildcard() -> None:
+    """Log a warning if CORS is configured with a wildcard origin."""
+    if _CORS_ORIGIN == "*":
+        LOG.warning(
+            "IGRILL_CORS_ORIGIN is set to '*' — this allows requests from any "
+            "origin and should only be used during development"
+        )
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
 
 def create_app(config: Config) -> web.Application:
     """Build a fully-wired :class:`aiohttp.web.Application`."""
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     store = DeviceStore()
     history = HistoryStore(config.db_path, config.reconnect_grace)
     evaluator = AlertEvaluator()
     hub = WebSocketHub()
-    metrics = MetricsRegistry()
 
     app["config"] = config
     app["store"] = store
     app["history"] = history
     app["evaluator"] = evaluator
     app["hub"] = hub
-    app["metrics"] = metrics
     app["start_time"] = time.monotonic()
 
     setup_routes(app)
@@ -44,13 +78,25 @@ def create_app(config: Config) -> web.Application:
     return app
 
 
+# ---------------------------------------------------------------------------
+# Server lifecycle
+# ---------------------------------------------------------------------------
+
+
 async def run() -> None:
     """Start the server, BLE scanner, and broadcast loops."""
     config = Config.from_env()
 
     setup_logging(config)
+    _warn_cors_wildcard()
 
     app = create_app(config)
+
+    # Open the database connection (async) and recover orphans
+    history: HistoryStore = app["history"]
+    await history.connect()
+    await history.recover_orphaned_sessions()
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.bind_address, config.port)
@@ -93,6 +139,7 @@ async def run() -> None:
         await app["hub"].remove(client)
 
     await runner.cleanup()
+    await history.close()
 
 
 if __name__ == "__main__":

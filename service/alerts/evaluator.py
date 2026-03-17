@@ -114,6 +114,7 @@ class AlertEvaluator:
                 state.exceeded_sent = True
                 state.reached_sent = True
                 state.approaching_sent = True
+                state.last_reminder_ts = now
                 events.append({"type": "target_exceeded", "payload": base_payload})
 
             if exceeded and target.reminder_interval_secs > 0:

@@ -13,7 +13,7 @@ from bleak import BleakScanner
 
 from service.ble.device_worker import DeviceWorker
 from service.models.device import DeviceStore
-from service.history.store import HistoryStore, now_iso
+from service.history.store import HistoryStore, now_iso_utc
 from service.alerts.evaluator import AlertEvaluator
 
 LOG = logging.getLogger("igrill.ble")
@@ -53,45 +53,18 @@ class DeviceManager:
     async def scan_loop(self) -> None:
         while True:
             try:
-                devices = await BleakScanner.discover(timeout=self.scan_timeout, return_adv=True)
-                scan_items = []
-                if isinstance(devices, dict):
-                    for key, value in devices.items():
-                        device = None
-                        adv_data = None
-                        if isinstance(value, tuple):
-                            device = value[0]
-                            adv_data = value[1] if len(value) > 1 else None
-                        elif hasattr(value, "address"):
-                            device = value
-                        else:
-                            adv_data = value
-                        address = getattr(device, "address", None) or (key if isinstance(key, str) else None)
-                        name = getattr(device, "name", None) or (getattr(adv_data, "local_name", None) if adv_data else None)
-                        rssi = getattr(adv_data, "rssi", None) if adv_data else None
-                        if address:
-                            scan_items.append((address, name, rssi))
-                else:
-                    for entry in devices:
-                        device = None
-                        adv_data = None
-                        address = None
-                        name = None
-                        rssi = None
-                        if isinstance(entry, tuple):
-                            device = entry[0]
-                            adv_data = entry[1] if len(entry) > 1 else None
-                            address = getattr(device, "address", None)
-                            name = getattr(device, "name", None) or (getattr(adv_data, "local_name", None) if adv_data else None)
-                            rssi = getattr(adv_data, "rssi", None) if adv_data else None
-                        elif hasattr(entry, "address"):
-                            device = entry
-                            address = getattr(device, "address", None)
-                            name = getattr(device, "name", None)
-                        elif isinstance(entry, str):
-                            address = entry
-                        if address:
-                            scan_items.append((address, name, rssi))
+                # return_adv=True yields dict[BLEDevice, AdvertisementData]
+                discovered = await BleakScanner.discover(
+                    timeout=self.scan_timeout, return_adv=True,
+                )
+                scan_items = [
+                    (
+                        device.address,
+                        device.name or getattr(adv, "local_name", None),
+                        getattr(adv, "rssi", None),
+                    )
+                    for device, adv in discovered.values()
+                ]
                 for address, name, rssi in scan_items:
                     if not address.lower().startswith(self.mac_prefix):
                         continue
@@ -99,7 +72,7 @@ class DeviceManager:
                     await self.store.upsert(
                         address,
                         name=name,
-                        last_seen=now_iso(),
+                        last_seen=now_iso_utc(),
                         rssi=rssi,
                     )
                     if address not in self._workers:
@@ -136,8 +109,20 @@ class DeviceManager:
 
             for address in dead_workers:
                 LOG.info("worker_respawn address=%s", address)
-                worker = self._workers[address]
+                old_worker = self._workers[address]
                 await self.store.upsert(address, connected=False, error="worker_crashed")
+                worker = DeviceWorker(
+                    address,
+                    old_worker.name,
+                    self.store,
+                    self.history,
+                    self.poll_interval,
+                    self.timeout,
+                    self._evaluator,
+                    connect_timeout=self._connect_timeout,
+                    max_backoff=self._max_backoff,
+                )
+                self._workers[address] = worker
                 self._tasks[address] = asyncio.create_task(worker.run())
 
             await asyncio.sleep(self.scan_interval)

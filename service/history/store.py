@@ -4,6 +4,8 @@ Rewritten to use the normalised schema from ``service.db.schema``.
 Session IDs are UUID hex strings, sessions are user-initiated only
 (no auto-session on startup), and probe readings are stored as
 individual rows rather than JSON blobs.
+
+Uses ``aiosqlite`` so that database I/O does not block the event loop.
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+import aiosqlite
+
+from service.db.migrations import run_migrations
 from service.db.schema import init_db
 from service.models.session import TargetConfig
 
@@ -27,11 +32,6 @@ LOG = logging.getLogger("igrill.session")
 # Module-level utility helpers (kept for backward compatibility — other
 # modules import these directly).
 # ---------------------------------------------------------------------------
-
-
-def now_iso() -> str:
-    """Return the current local time as an ISO-8601 string."""
-    return datetime.now().astimezone().isoformat()
 
 
 def now_iso_utc() -> str:
@@ -58,6 +58,10 @@ class HistoryStore:
     Uses the normalised schema defined in ``service.db.schema``.  Session
     IDs are 32-character UUID hex strings.  No session is created on
     construction — call :meth:`start_session` explicitly.
+
+    Database operations are performed through ``aiosqlite`` so they do not
+    block the event loop.  An ``asyncio.Lock`` serialises multi-statement
+    transactions to prevent interleaving.
     """
 
     def __init__(self, db_path: str, reconnect_grace: int) -> None:
@@ -67,16 +71,57 @@ class HistoryStore:
         self._current_session_id: Optional[str] = None
         self._current_session_start_ts: Optional[str] = None
         self._last_session_id: Optional[str] = None
-        self._last_disconnect_ts: Optional[datetime] = None
-        self._last_disconnect_sensor: Optional[str] = None
+        self._conn: Optional[aiosqlite.Connection] = None
 
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        init_db(self._conn)
+    async def connect(self) -> None:
+        """Open the database connection and initialise the schema.
+
+        Must be called (and awaited) before any other method.
+        """
+        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+        self._conn = await aiosqlite.connect(self._db_path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA synchronous=NORMAL")
+        await self._conn.execute("PRAGMA foreign_keys=ON")
+        await init_db(self._conn)
+        await run_migrations(self._conn)
+
+    async def close(self) -> None:
+        """Close the database connection cleanly."""
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    # ------------------------------------------------------------------
+    # Orphaned session recovery
+    # ------------------------------------------------------------------
+
+    async def recover_orphaned_sessions(self) -> None:
+        """Close any sessions left open by a previous crash.
+
+        Called once at startup, before the BLE scanner begins.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT id, started_at FROM sessions WHERE ended_at IS NULL"
+            )
+            orphans = await cursor.fetchall()
+            if not orphans:
+                return
+
+            now_ts = now_iso_utc()
+            for row in orphans:
+                await self._conn.execute(
+                    "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+                    (now_ts, "server_restart", row["id"]),
+                )
+                LOG.warning(
+                    "Closed orphaned session %s (started %s)",
+                    row["id"],
+                    row["started_at"],
+                )
+            await self._conn.commit()
 
     # ------------------------------------------------------------------
     # Session lifecycle (user-initiated only)
@@ -98,25 +143,25 @@ class HistoryStore:
         async with self._lock:
             end_event = None
             if self._current_session_id is not None:
-                end_event = self._end_session_locked(reason)
+                end_event = await self._end_session_locked(reason)
 
             now_ts = now_iso_utc()
             session_id = uuid.uuid4().hex
 
-            self._conn.execute(
+            await self._conn.execute(
                 "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
                 (session_id, now_ts, reason),
             )
 
             for addr in addresses:
-                self._register_device_locked(addr, name=None, model=None)
-                self._conn.execute(
+                await self._register_device_locked(addr, name=None, model=None)
+                await self._conn.execute(
                     "INSERT OR IGNORE INTO session_devices (session_id, address, joined_at) "
                     "VALUES (?, ?, ?)",
                     (session_id, addr, now_ts),
                 )
 
-            self._conn.commit()
+            await self._conn.commit()
 
             self._current_session_id = session_id
             self._current_session_start_ts = now_ts
@@ -141,9 +186,21 @@ class HistoryStore:
         else ``None``.
         """
         async with self._lock:
-            return self._end_session_locked(reason)
+            result = await self._end_session_locked(reason)
 
-    def _end_session_locked(self, reason: str) -> Optional[dict]:
+        # Run downsampling outside the lock — it's safe because there's no
+        # concurrent writer for a just-ended session.
+        if result is not None:
+            session_id = result["sessionId"]
+            try:
+                from service.history.downsampler import downsample_session
+                await downsample_session(self, session_id)
+            except Exception:
+                LOG.exception("Downsampling failed for session %s", session_id)
+
+        return result
+
+    async def _end_session_locked(self, reason: str) -> Optional[dict]:
         """End the current session (must be called while holding ``_lock``)."""
         if self._current_session_id is None:
             return None
@@ -158,11 +215,11 @@ class HistoryStore:
             if start_dt and end_dt:
                 duration_seconds = int((end_dt - start_dt).total_seconds())
 
-        self._conn.execute(
+        await self._conn.execute(
             "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
             (now_ts, reason, session_id),
         )
-        self._conn.commit()
+        await self._conn.commit()
 
         self._last_session_id = session_id
         self._current_session_id = None
@@ -200,46 +257,47 @@ class HistoryStore:
         """Mark a device as having left the session."""
         async with self._lock:
             now_ts = now_iso_utc()
-            self._conn.execute(
+            await self._conn.execute(
                 "UPDATE session_devices SET left_at = ? "
                 "WHERE session_id = ? AND address = ?",
                 (now_ts, session_id, address),
             )
-            self._conn.commit()
+            await self._conn.commit()
 
     async def device_rejoined_session(self, session_id: str, address: str) -> None:
         """Clear the ``left_at`` timestamp so the device is active again."""
         async with self._lock:
-            self._conn.execute(
+            await self._conn.execute(
                 "UPDATE session_devices SET left_at = NULL "
                 "WHERE session_id = ? AND address = ?",
                 (session_id, address),
             )
-            self._conn.commit()
+            await self._conn.commit()
 
     async def add_device_to_session(self, session_id: str, address: str) -> None:
         """Add a new device to an active session."""
         async with self._lock:
             now_ts = now_iso_utc()
-            self._register_device_locked(address, name=None, model=None)
-            self._conn.execute(
+            await self._register_device_locked(address, name=None, model=None)
+            await self._conn.execute(
                 "INSERT OR IGNORE INTO session_devices (session_id, address, joined_at) "
                 "VALUES (?, ?, ?)",
                 (session_id, address, now_ts),
             )
-            self._conn.commit()
+            await self._conn.commit()
 
     async def get_session_devices(self, session_id: str) -> list[dict]:
         """Return devices in a session."""
         async with self._lock:
-            rows = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT sd.session_id, sd.address, sd.joined_at, sd.left_at, "
                 "d.name, d.model "
                 "FROM session_devices sd "
                 "LEFT JOIN devices d ON sd.address = d.address "
                 "WHERE sd.session_id = ?",
                 (session_id,),
-            ).fetchall()
+            )
+            rows = await cursor.fetchall()
             return [
                 {
                     "session_id": row["session_id"],
@@ -255,12 +313,13 @@ class HistoryStore:
     async def all_devices_left(self, session_id: str) -> bool:
         """Return True if all devices in the session have ``left_at`` set."""
         async with self._lock:
-            row = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT COUNT(*) as total, "
                 "COUNT(left_at) as left_count "
                 "FROM session_devices WHERE session_id = ?",
                 (session_id,),
-            ).fetchone()
+            )
+            row = await cursor.fetchone()
             if row["total"] == 0:
                 return True
             return row["left_count"] == row["total"]
@@ -274,19 +333,20 @@ class HistoryStore:
     ) -> None:
         """Upsert a device into the ``devices`` table."""
         async with self._lock:
-            self._register_device_locked(address, name, model)
-            self._conn.commit()
+            await self._register_device_locked(address, name, model)
+            await self._conn.commit()
 
-    def _register_device_locked(
+    async def _register_device_locked(
         self, address: str, name: Optional[str], model: Optional[str]
     ) -> None:
         """Insert or update device (must hold ``_lock``)."""
         now_ts = now_iso_utc()
-        existing = self._conn.execute(
+        cursor = await self._conn.execute(
             "SELECT address FROM devices WHERE address = ?", (address,)
-        ).fetchone()
+        )
+        existing = await cursor.fetchone()
         if existing is None:
-            self._conn.execute(
+            await self._conn.execute(
                 "INSERT INTO devices (address, name, model, first_seen, last_seen) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (address, name, model, now_ts, now_ts),
@@ -301,7 +361,7 @@ class HistoryStore:
                 parts.append("model = ?")
                 params.append(model)
             params.append(address)
-            self._conn.execute(
+            await self._conn.execute(
                 f"UPDATE devices SET {', '.join(parts)} WHERE address = ?",
                 params,
             )
@@ -309,9 +369,10 @@ class HistoryStore:
     async def list_devices(self) -> list[dict]:
         """Return all known devices."""
         async with self._lock:
-            rows = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT address, name, model, first_seen, last_seen FROM devices"
-            ).fetchall()
+            )
+            rows = await cursor.fetchall()
             return [
                 {
                     "address": row["address"],
@@ -347,7 +408,7 @@ class HistoryStore:
             ts = recorded_at if recorded_at is not None else now_iso_utc()
             heating_json = json.dumps(heating) if heating is not None else None
 
-            self._conn.execute(
+            await self._conn.execute(
                 "INSERT OR REPLACE INTO device_readings "
                 "(session_id, address, recorded_at, seq, battery, propane, heating_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -355,7 +416,7 @@ class HistoryStore:
             )
 
             for probe in probes:
-                self._conn.execute(
+                await self._conn.execute(
                     "INSERT OR REPLACE INTO probe_readings "
                     "(session_id, address, recorded_at, seq, probe_index, temperature) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
@@ -369,12 +430,12 @@ class HistoryStore:
                     ),
                 )
 
-            self._conn.commit()
+            await self._conn.commit()
 
     async def get_session_readings(self, session_id: str) -> list[dict]:
         """Return all probe readings for a session, ordered by recorded_at."""
         async with self._lock:
-            rows = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT pr.session_id, pr.address, pr.recorded_at, pr.seq, "
                 "pr.probe_index, pr.temperature, "
                 "dr.battery, dr.propane, dr.heating_json "
@@ -386,7 +447,8 @@ class HistoryStore:
                 "WHERE pr.session_id = ? "
                 "ORDER BY pr.recorded_at ASC, pr.probe_index ASC",
                 (session_id,),
-            ).fetchall()
+            )
+            rows = await cursor.fetchall()
             return [
                 {
                     "session_id": row["session_id"],
@@ -432,13 +494,12 @@ class HistoryStore:
             if session_id is not None:
                 query += " AND pr.session_id = ?"
                 params.append(session_id)
-            else:
-                if since_ts:
-                    query += " AND pr.recorded_at >= ?"
-                    params.append(since_ts)
-                if until_ts:
-                    query += " AND pr.recorded_at <= ?"
-                    params.append(until_ts)
+            if since_ts:
+                query += " AND pr.recorded_at >= ?"
+                params.append(since_ts)
+            if until_ts:
+                query += " AND pr.recorded_at <= ?"
+                params.append(until_ts)
 
             query += " ORDER BY pr.recorded_at ASC, pr.probe_index ASC"
 
@@ -446,68 +507,87 @@ class HistoryStore:
                 query += " LIMIT ?"
                 params.append(limit)
 
-            rows = self._conn.execute(query, params).fetchall()
-            return [
-                {
-                    "session_id": row["session_id"],
-                    "address": row["address"],
-                    "recorded_at": row["recorded_at"],
-                    "seq": row["seq"],
-                    "probe_index": row["probe_index"],
-                    "temperature": row["temperature"],
-                    "battery": row["battery"],
-                    "propane": row["propane"],
-                    "heating": json.loads(row["heating_json"])
-                    if row["heating_json"]
-                    else None,
-                }
-                for row in rows
-            ]
+            cursor = await self._conn.execute(query, params)
+            results: list[dict] = []
+            while True:
+                batch = await cursor.fetchmany(500)
+                if not batch:
+                    break
+                for row in batch:
+                    results.append(
+                        {
+                            "session_id": row["session_id"],
+                            "address": row["address"],
+                            "recorded_at": row["recorded_at"],
+                            "seq": row["seq"],
+                            "probe_index": row["probe_index"],
+                            "temperature": row["temperature"],
+                            "battery": row["battery"],
+                            "propane": row["propane"],
+                            "heating": json.loads(row["heating_json"])
+                            if row["heating_json"]
+                            else None,
+                        }
+                    )
+            return results
 
     # ------------------------------------------------------------------
     # Session listing
     # ------------------------------------------------------------------
 
     async def list_sessions(self, limit: int, offset: int = 0) -> list[dict]:
-        """Return recent sessions with reading counts and device info."""
+        """Return recent sessions with reading counts and device info.
+
+        Uses a single query with GROUP_CONCAT to avoid N+1 queries.
+        """
         async with self._lock:
-            rows = self._conn.execute(
+            # Step 1: fetch sessions with reading counts
+            cursor = await self._conn.execute(
                 "SELECT s.id, s.started_at, s.ended_at, s.start_reason, s.end_reason, "
-                "COUNT(DISTINCT pr.id) as reading_count "
+                "(SELECT COUNT(*) FROM probe_readings pr WHERE pr.session_id = s.id) AS reading_count "
                 "FROM sessions s "
-                "LEFT JOIN probe_readings pr ON s.id = pr.session_id "
-                "GROUP BY s.id "
                 "ORDER BY s.started_at DESC "
                 "LIMIT ? OFFSET ?",
                 (limit, offset),
-            ).fetchall()
+            )
+            session_rows = await cursor.fetchall()
+
+            if not session_rows:
+                return []
+
+            # Step 2: batch-fetch devices for all sessions in one query
+            session_ids = [row["id"] for row in session_rows]
+            placeholders = ",".join("?" for _ in session_ids)
+            cursor = await self._conn.execute(
+                "SELECT sd.session_id, sd.address, d.name, d.model "
+                "FROM session_devices sd "
+                "LEFT JOIN devices d ON sd.address = d.address "
+                f"WHERE sd.session_id IN ({placeholders})",
+                session_ids,
+            )
+            device_rows = await cursor.fetchall()
+
+            # Group devices by session_id
+            devices_by_session: dict[str, list[dict]] = {}
+            for dr in device_rows:
+                sid = dr["session_id"]
+                devices_by_session.setdefault(sid, []).append({
+                    "address": dr["address"],
+                    "name": dr["name"],
+                    "model": dr["model"],
+                })
 
             results = []
-            for row in rows:
-                session_id = row["id"]
-                devices = self._conn.execute(
-                    "SELECT sd.address, d.name, d.model "
-                    "FROM session_devices sd "
-                    "LEFT JOIN devices d ON sd.address = d.address "
-                    "WHERE sd.session_id = ?",
-                    (session_id,),
-                ).fetchall()
+            for row in session_rows:
                 results.append(
                     {
-                        "sessionId": session_id,
+                        "sessionId": row["id"],
                         "startTs": row["started_at"],
                         "endTs": row["ended_at"],
                         "startReason": row["start_reason"],
                         "endReason": row["end_reason"],
                         "readingCount": row["reading_count"],
-                        "devices": [
-                            {
-                                "address": d["address"],
-                                "name": d["name"],
-                                "model": d["model"],
-                            }
-                            for d in devices
-                        ],
+                        "devices": devices_by_session.get(row["id"], []),
                     }
                 )
             return results
@@ -522,7 +602,7 @@ class HistoryStore:
         """Persist target configs for a session and device."""
         async with self._lock:
             for t in targets:
-                self._conn.execute(
+                await self._conn.execute(
                     "INSERT OR REPLACE INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
                     "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
@@ -539,17 +619,18 @@ class HistoryStore:
                         t.reminder_interval_secs,
                     ),
                 )
-            self._conn.commit()
+            await self._conn.commit()
 
     async def get_targets(self, session_id: str) -> list[TargetConfig]:
         """Retrieve all target configs for a session."""
         async with self._lock:
-            rows = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT probe_index, mode, target_value, range_low, range_high, "
                 "pre_alert_offset, reminder_interval_secs "
                 "FROM session_targets WHERE session_id = ?",
                 (session_id,),
-            ).fetchall()
+            )
+            rows = await cursor.fetchall()
         return [
             TargetConfig(
                 probe_index=r["probe_index"],
@@ -568,12 +649,12 @@ class HistoryStore:
     ) -> None:
         """Replace all targets for a session and device."""
         async with self._lock:
-            self._conn.execute(
+            await self._conn.execute(
                 "DELETE FROM session_targets WHERE session_id = ? AND address = ?",
                 (session_id, address),
             )
             for t in targets:
-                self._conn.execute(
+                await self._conn.execute(
                     "INSERT INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
                     "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
@@ -590,26 +671,37 @@ class HistoryStore:
                         t.reminder_interval_secs,
                     ),
                 )
-            self._conn.commit()
+            await self._conn.commit()
 
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
 
+    async def session_exists(self, session_id: str) -> bool:
+        """Return True if a session with the given ID exists."""
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = await cursor.fetchone()
+            return row is not None
+
     async def has_history(self) -> bool:
         """Return True if there is at least one recorded reading."""
         async with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) as cnt FROM probe_readings LIMIT 1"
-            ).fetchone()
-            return row["cnt"] > 0
+            cursor = await self._conn.execute(
+                "SELECT 1 FROM probe_readings LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            return row is not None
 
     async def latest_ts(self) -> Optional[str]:
         """Return the most recent recorded_at timestamp, or None."""
         async with self._lock:
-            row = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT MAX(recorded_at) as ts FROM probe_readings"
-            ).fetchone()
+            )
+            row = await cursor.fetchone()
             return row["ts"] if row else None
 
     async def is_device_in_session(self, address: str) -> bool:
@@ -618,11 +710,12 @@ class HistoryStore:
         async with self._lock:
             if self._current_session_id is None:
                 return False
-            row = self._conn.execute(
+            cursor = await self._conn.execute(
                 "SELECT 1 FROM session_devices "
                 "WHERE session_id = ? AND address = ? AND left_at IS NULL",
                 (self._current_session_id, address),
-            ).fetchone()
+            )
+            row = await cursor.fetchone()
             return row is not None
 
     async def get_current_session_id(self) -> Optional[str]:
@@ -630,12 +723,39 @@ class HistoryStore:
         async with self._lock:
             return self._current_session_id
 
+    async def get_max_seq(self, session_id: str, address: str) -> int:
+        """Return the highest seq number recorded for a device in a session.
+
+        Returns 0 if no readings exist yet.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT MAX(seq) as max_seq FROM probe_readings "
+                "WHERE session_id = ? AND address = ?",
+                (session_id, address),
+            )
+            row = await cursor.fetchone()
+            return row["max_seq"] or 0
+
     # ------------------------------------------------------------------
-    # Disconnect tracking
+    # Downsampling support
     # ------------------------------------------------------------------
 
-    async def note_disconnect(self, sensor_id: str, ts: str) -> None:
-        """Record a disconnect timestamp for grace period tracking."""
+    async def execute_downsampling(
+        self, session_id: str, older_than, newer_than, bucket_seconds: int, label: str,
+    ) -> None:
+        """Run a downsampling pass on probe_readings for the given session.
+
+        Called by ``service.history.downsampler`` — provides controlled access
+        to the database connection without exposing private attributes.
+        """
+        from service.history.downsampler import downsample_range
+
         async with self._lock:
-            self._last_disconnect_ts = parse_iso(ts)
-            self._last_disconnect_sensor = sensor_id
+            await downsample_range(
+                self._conn, session_id,
+                older_than=older_than,
+                newer_than=newer_than,
+                bucket_seconds=bucket_seconds,
+                label=label,
+            )

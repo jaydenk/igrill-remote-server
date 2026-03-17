@@ -60,7 +60,7 @@ def parse_pulse_element(data: bytes) -> Dict[str, Optional[int]]:
 
 def build_reading_payload(
     device_entry: Dict[str, object],
-    session_id: Optional[int],
+    session_id: Optional[str],
     session_start_ts: Optional[str],
 ) -> Dict[str, object]:
     """Build the standardised reading payload broadcast over WebSocket.

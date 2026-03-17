@@ -5,11 +5,6 @@ import pytest
 from service.history.store import HistoryStore
 
 
-@pytest.fixture
-def store(tmp_db):
-    return HistoryStore(tmp_db, reconnect_grace=60)
-
-
 @pytest.mark.asyncio
 async def test_no_session_on_startup(store):
     state = await store.get_session_state()
@@ -57,7 +52,7 @@ async def test_record_reading_during_session(store):
         heating=None,
     )
     items = await store.get_session_readings(start["session_id"])
-    assert len(items) > 0
+    assert len(items) == 1
 
 
 @pytest.mark.asyncio
@@ -241,14 +236,6 @@ async def test_update_targets(store):
     assert len(loaded) == 1
     assert loaded[0].mode == "range"
     assert loaded[0].range_low == 60.0
-
-
-@pytest.mark.asyncio
-async def test_note_disconnect(store):
-    """note_disconnect should record the disconnect timestamp."""
-    await store.note_disconnect("70:91:8F:00:00:01", "2026-01-01T00:00:00+00:00")
-    # Verify internal state was updated (no public getter, but no exception is good)
-    assert store._last_disconnect_sensor == "70:91:8F:00:00:01"
 
 
 @pytest.mark.asyncio

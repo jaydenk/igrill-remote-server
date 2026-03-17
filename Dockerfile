@@ -18,4 +18,7 @@ COPY README.md /app/README.md
 
 EXPOSE 39120
 
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD wget -qO- http://localhost:39120/health || exit 1
+
 CMD ["python", "-m", "service.main"]

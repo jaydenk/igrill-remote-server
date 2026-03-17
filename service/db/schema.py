@@ -2,6 +2,8 @@
 
 import sqlite3
 
+import aiosqlite
+
 SCHEMA_VERSION = 1
 
 _SCHEMA_SQL = """
@@ -77,17 +79,18 @@ CREATE INDEX IF NOT EXISTS idx_session_targets_session ON session_targets(sessio
 """
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+async def init_db(conn: aiosqlite.Connection) -> None:
     """Create all tables if they don't exist and record schema version."""
-    conn.executescript(_SCHEMA_SQL)
+    await conn.executescript(_SCHEMA_SQL)
 
-    existing = conn.execute(
+    cursor = await conn.execute(
         "SELECT version FROM schema_version WHERE version = ?",
         (SCHEMA_VERSION,),
-    ).fetchone()
+    )
+    existing = await cursor.fetchone()
     if existing is None:
-        conn.execute(
+        await conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
             (SCHEMA_VERSION,),
         )
-        conn.commit()
+        await conn.commit()

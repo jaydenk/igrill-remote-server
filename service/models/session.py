@@ -52,14 +52,30 @@ class TargetConfig:
     @classmethod
     def from_dict(cls, data: dict) -> TargetConfig:
         """Construct a :class:`TargetConfig` from a plain dictionary."""
+        mode = str(data.get("mode", "fixed"))
+        if mode not in ("fixed", "range"):
+            raise ValueError(f"Invalid target mode: {mode!r} (must be 'fixed' or 'range')")
+
+        probe_index = int(data["probe_index"])
+        if not 1 <= probe_index <= 4:
+            raise ValueError(f"probe_index must be 1-4, got {probe_index}")
+
+        pre_alert_offset = float(data.get("pre_alert_offset", 10.0))
+        if pre_alert_offset < 0:
+            raise ValueError(f"pre_alert_offset must be >= 0, got {pre_alert_offset}")
+
+        reminder_interval_secs = int(data.get("reminder_interval_secs", 300))
+        if reminder_interval_secs < 0:
+            raise ValueError(f"reminder_interval_secs must be >= 0, got {reminder_interval_secs}")
+
         return cls(
-            probe_index=int(data["probe_index"]),
-            mode=str(data.get("mode", "fixed")),
+            probe_index=probe_index,
+            mode=mode,
             target_value=_opt_float(data.get("target_value")),
             range_low=_opt_float(data.get("range_low")),
             range_high=_opt_float(data.get("range_high")),
-            pre_alert_offset=float(data.get("pre_alert_offset", 10.0)),
-            reminder_interval_secs=int(data.get("reminder_interval_secs", 300)),
+            pre_alert_offset=pre_alert_offset,
+            reminder_interval_secs=reminder_interval_secs,
         )
 
     def to_dict(self) -> dict:

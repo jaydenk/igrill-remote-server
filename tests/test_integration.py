@@ -14,7 +14,10 @@ def config(tmp_db):
 @pytest_asyncio.fixture
 async def client(aiohttp_client, config):
     app = create_app(config)
-    return await aiohttp_client(app)
+    await app["history"].connect()
+    c = await aiohttp_client(app)
+    yield c
+    await app["history"].close()
 
 
 @pytest.mark.asyncio
@@ -36,14 +39,6 @@ async def test_no_sessions_on_start(client):
 
 
 @pytest.mark.asyncio
-async def test_metrics_renders(client):
-    """Metrics endpoint serves text."""
-    resp = await client.get("/metrics")
-    assert resp.status == 200
-    assert "text/plain" in resp.content_type
-
-
-@pytest.mark.asyncio
 async def test_dashboard_loads(client):
     """Dashboard HTML loads."""
     resp = await client.get("/")
@@ -53,12 +48,12 @@ async def test_dashboard_loads(client):
 
 
 @pytest.mark.asyncio
-async def test_session_detail_empty(client):
-    """Session detail for nonexistent ID returns empty."""
+async def test_session_detail_not_found(client):
+    """Session detail for nonexistent ID returns 404."""
     resp = await client.get("/api/sessions/nonexistent")
-    assert resp.status == 200
+    assert resp.status == 404
     data = await resp.json()
-    assert data["readings"] == []
+    assert data["error"] == "session not found"
 
 
 @pytest.mark.asyncio

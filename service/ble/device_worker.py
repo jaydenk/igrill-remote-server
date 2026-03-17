@@ -27,39 +27,19 @@ from service.ble.protocol import (
     ModelInfo,
     detect_model,
 )
+from service.api.envelope import make_envelope
 from service.models.device import DeviceStore
 from service.models.reading import (
     build_reading_payload,
     parse_pulse_element,
     parse_temperature_probe,
 )
-from service.history.store import HistoryStore, now_iso, now_iso_utc
+from service.history.store import HistoryStore, now_iso_utc
 from service.alerts.evaluator import AlertEvaluator
 
 LOG = logging.getLogger("igrill.ble")
 
 _AUTH_MAX_RETRIES = 3
-
-
-# ---------------------------------------------------------------------------
-# Envelope helper (local, until the full envelope module arrives in Task 7)
-# ---------------------------------------------------------------------------
-
-def _make_envelope(
-    msg_type: str,
-    payload: Dict[str, object],
-    seq: Optional[int] = None,
-) -> Dict[str, object]:
-    """Build a v2 event envelope."""
-    env: Dict[str, object] = {
-        "v": 2,
-        "type": msg_type,
-        "ts": now_iso_utc(),
-        "payload": payload,
-    }
-    if seq is not None:
-        env["seq"] = seq
-    return env
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +130,13 @@ class DeviceWorker:
 
                     await self._poll_loop(client, services)
 
-                    # On disconnect: mark device as left if session is active
-                    session_id = await self.history.get_current_session_id()
-                    if session_id is not None and await self.history.is_device_in_session(self.address):
-                        await self.history.device_left_session(session_id, self.address)
+                # BleakClient context manager has exited — BLE handle released.
+                # Now safe to do session cleanup and backoff sleep.
+                session_id = await self.history.get_current_session_id()
+                if session_id is not None and await self.history.is_device_in_session(self.address):
+                    await self.history.device_left_session(session_id, self.address)
 
-                    await self.history.note_disconnect(self.address, now_iso_utc())
-                    await self._handle_disconnect()
+                await self._handle_disconnect()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -176,7 +156,6 @@ class DeviceWorker:
                     except Exception:
                         LOG.debug("Failed to mark device %s as left on error", self.address)
 
-                await self.history.note_disconnect(self.address, now_iso_utc())
                 await self._handle_disconnect()
 
     # -- Internal helpers ---------------------------------------------------
@@ -192,7 +171,7 @@ class DeviceWorker:
 
     async def _publish_state_change_event(self) -> None:
         """Publish a device_state_change event to the store's event queue."""
-        envelope = _make_envelope(
+        envelope = make_envelope(
             "device_state_change",
             {
                 "address": self.address,
@@ -287,6 +266,18 @@ class DeviceWorker:
         probe_uuids: List[str] = []
         if self._model:
             probe_uuids = PROBE_TEMPERATURE_UUIDS[: self._model.probe_count]
+
+        # Seed _seq from the database to avoid overwriting readings after a
+        # worker crash/respawn (INSERT OR REPLACE keys on session+address+seq).
+        session_id = await self.history.get_current_session_id()
+        if session_id is not None:
+            self._seq = await self.history.get_max_seq(session_id, self.address)
+        prev_session_id = session_id
+
+        # Separate counter for WebSocket broadcasts (always increments,
+        # independent of DB seq which only advances during sessions).
+        ws_seq = self._seq
+
         while client.is_connected and not self._stop.is_set():
             payload = await self._read_metrics(client, services, probe_uuids)
 
@@ -294,6 +285,12 @@ class DeviceWorker:
             session_state = await self.history.get_session_state()
             session_id = session_state.get("current_session_id")
             session_start_ts = session_state.get("current_session_start_ts")
+
+            # Re-seed _seq when session changes to avoid conflicts
+            if session_id != prev_session_id:
+                if session_id is not None:
+                    self._seq = await self.history.get_max_seq(session_id, self.address)
+                prev_session_id = session_id
 
             # Always update device store with latest readings (live dashboard)
             await self.store.upsert(
@@ -304,7 +301,7 @@ class DeviceWorker:
             )
 
             # Always publish readings to WebSocket (live dashboard works without session)
-            self._seq += 1
+            ws_seq += 1
             device_entry = await self.store.get_device(self.address)
             if device_entry is None:
                 await asyncio.sleep(self.poll_interval)
@@ -316,7 +313,7 @@ class DeviceWorker:
             )
             await self.store.publish_reading(
                 {
-                    "seq": self._seq,
+                    "seq": ws_seq,
                     "payload": reading_payload,
                 }
             )
@@ -324,6 +321,7 @@ class DeviceWorker:
             # Only record to DB and evaluate alerts when a session is active
             # and this device is part of it
             if session_id is not None and await self.history.is_device_in_session(self.address):
+                self._seq += 1
                 probes: List[Dict[str, Any]] = payload.get("probes", [])  # type: ignore[assignment]
                 await self.history.record_reading(
                     session_id=session_id,
@@ -339,7 +337,7 @@ class DeviceWorker:
                 if probes:
                     alert_events = self._evaluator.evaluate(session_id, probes, self.address)
                     for alert_evt in alert_events:
-                        envelope = _make_envelope(alert_evt["type"], alert_evt["payload"])
+                        envelope = make_envelope(alert_evt["type"], alert_evt["payload"])
                         await self.store.publish_event(envelope)
 
             await asyncio.sleep(self.poll_interval)
@@ -347,7 +345,7 @@ class DeviceWorker:
     async def _read_metrics(
         self, client: BleakClient, services, probe_uuids: List[str]
     ) -> Dict[str, object]:
-        payload: Dict[str, object] = {"last_update": now_iso(), "connected": True, "error": None}
+        payload: Dict[str, object] = {"last_update": now_iso_utc(), "connected": True, "error": None}
 
         unit_data = await self._read_char(client, TEMPERATURE_UNIT_UUID, services)
         if unit_data:
@@ -365,7 +363,7 @@ class DeviceWorker:
 
         propane_data = await self._read_char(client, PROPANE_LEVEL_UUID, services)
         if propane_data:
-            payload["propane_percent"] = propane_data[0] * 25
+            payload["propane_percent"] = min(propane_data[0] * 25, 100)
 
         probes: List[Dict[str, object]] = []
         for index, uuid in enumerate(probe_uuids, start=1):
@@ -387,21 +385,13 @@ class DeviceWorker:
                 json.dumps(connected_probes),
             )
             self._connected_logged = True
-        LOG.info(
+        LOG.debug(
             "%s mac_address: %s last_update: %s probes: %s",
             device_label,
             self.address,
             payload["last_update"],
             json.dumps(probes),
         )
-        if probes:
-            LOG.debug(
-                "%s mac_address: %s last_update: %s probes: %s",
-                device_label,
-                self.address,
-                payload["last_update"],
-                json.dumps(probes),
-            )
 
         if self._model and self._model.is_pulse:
             pulse_data = await self._read_char(client, PULSE_ELEMENT_UUID, services)
@@ -418,8 +408,11 @@ class DeviceWorker:
             LOG.debug("Read %s from %s: %s", uuid, self.address, data.hex())
             return data
         except asyncio.TimeoutError:
-            LOG.warning("Timeout reading %s from %s", uuid, self.address)
+            LOG.warning("Timeout reading %s from %s (transient)", uuid, self.address)
             return None
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            LOG.warning("Connection error reading %s from %s: %s", uuid, self.address, exc)
+            raise
         except Exception as exc:
             LOG.warning("Read error %s from %s: %s", uuid, self.address, exc)
             return None

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from aiohttp import web
 
@@ -23,37 +25,165 @@ from service.models.session import TargetConfig
 
 LOG = logging.getLogger("igrill.ws")
 
+_SESSION_CONTROL_TYPES = frozenset({
+    "session_start_request",
+    "session_end_request",
+    "session_add_device_request",
+    "target_update_request",
+})
+
 
 # ---------------------------------------------------------------------------
-# WebSocketClient — per-connection queue and sender task
+# Simple per-peer rate limiter
+# ---------------------------------------------------------------------------
+
+
+class _RateLimiter:
+    """Sliding-window rate limiter keyed by an arbitrary string (e.g. peer IP)."""
+
+    _MAX_TRACKED_KEYS = 256
+    _SWEEP_INTERVAL = 300.0  # seconds between full eviction sweeps
+
+    def __init__(self, max_requests: int, window_seconds: float) -> None:
+        self._max = max_requests
+        self._window = window_seconds
+        self._requests: dict[str, list[float]] = {}
+        self._last_sweep: float = 0.0
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+
+        # Periodic sweep: remove all keys with only expired entries
+        if now - self._last_sweep > self._SWEEP_INTERVAL:
+            self._sweep(now)
+            self._last_sweep = now
+
+        entries = self._requests.get(key, [])
+        entries = [t for t in entries if now - t < self._window]
+        if not entries:
+            self._requests.pop(key, None)
+        if len(entries) >= self._max:
+            self._requests[key] = entries
+            return False
+        entries.append(now)
+        self._requests[key] = entries
+        return True
+
+    def _sweep(self, now: float) -> None:
+        """Remove keys whose entries have all expired."""
+        expired_keys = [
+            k for k, v in self._requests.items()
+            if not any(now - t < self._window for t in v)
+        ]
+        for k in expired_keys:
+            del self._requests[k]
+
+
+# Rate limit session-control messages: 10 per 60 seconds per peer
+_session_limiter = _RateLimiter(max_requests=10, window_seconds=60)
+
+
+# ---------------------------------------------------------------------------
+# WebSocketClient — per-connection queues and sender task
 # ---------------------------------------------------------------------------
 
 
 class WebSocketClient:
-    """Wraps a WebSocket connection with a bounded outgoing queue."""
+    """Wraps a WebSocket connection with separate queues for readings and
+    critical events, ensuring events are never dropped by reading back-pressure."""
 
-    def __init__(self, ws: web.WebSocketResponse, queue_size: int = 1) -> None:
+    def __init__(self, ws: web.WebSocketResponse) -> None:
         self.ws = ws
-        self.queue: asyncio.Queue[Dict[str, object]] = asyncio.Queue(maxsize=queue_size)
+        self._reading_queue: asyncio.Queue[Dict[str, object]] = asyncio.Queue(maxsize=1)
+        self._event_queue: asyncio.Queue[Dict[str, object]] = asyncio.Queue(maxsize=64)
         self.task = asyncio.create_task(self._sender())
 
     async def _sender(self) -> None:
         while True:
-            message = await self.queue.get()
+            # Prioritise critical events over readings
+            try:
+                message = self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # No critical event — wait for either queue
+                reading_wait = asyncio.create_task(self._reading_queue.get())
+                event_wait = asyncio.create_task(self._event_queue.get())
+                try:
+                    done, pending = await asyncio.wait(
+                        {reading_wait, event_wait},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for p in pending:
+                        p.cancel()
+                        # If the pending task already completed before cancel,
+                        # re-enqueue its result so it isn't lost.
+                        if not p.cancelled():
+                            try:
+                                leftover = p.result()
+                                target = (
+                                    self._event_queue
+                                    if p is event_wait
+                                    else self._reading_queue
+                                )
+                                try:
+                                    target.put_nowait(leftover)
+                                except asyncio.QueueFull:
+                                    pass
+                            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                                pass
+                    # When both tasks complete simultaneously, prioritise
+                    # events and re-enqueue the other result.
+                    if len(done) > 1:
+                        event_result = None
+                        reading_result = None
+                        for d in done:
+                            if d is event_wait:
+                                event_result = d.result()
+                            else:
+                                reading_result = d.result()
+                        message = event_result if event_result is not None else reading_result
+                        leftover_msg = reading_result if event_result is not None else event_result
+                        if leftover_msg is not None:
+                            target = (
+                                self._reading_queue
+                                if event_result is not None
+                                else self._event_queue
+                            )
+                            try:
+                                target.put_nowait(leftover_msg)
+                            except asyncio.QueueFull:
+                                pass
+                    else:
+                        message = done.pop().result()
+                except asyncio.CancelledError:
+                    reading_wait.cancel()
+                    event_wait.cancel()
+                    raise
+
             if self.ws.closed:
                 break
-            await self.ws.send_json(message)
+            try:
+                await self.ws.send_json(message)
+            except (ConnectionError, OSError):
+                break
 
     def enqueue(self, message: Dict[str, object], critical: bool = False) -> None:
-        """Enqueue a message. Drops oldest non-critical messages when full."""
-        if self.queue.full():
-            while not self.queue.empty():
+        """Enqueue a message.  Non-critical messages replace the previous
+        reading when the reading queue is full.  Critical messages are
+        buffered in a larger queue."""
+        if critical:
+            if self._event_queue.full():
                 try:
-                    self.queue.get_nowait()
+                    self._event_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    break
-        if not self.queue.full() or critical:
-            self.queue.put_nowait(message)
+                    pass
+            self._event_queue.put_nowait(message)
+        else:
+            if self._reading_queue.full():
+                try:
+                    self._reading_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            self._reading_queue.put_nowait(message)
 
     async def close(self) -> None:
         if not self.task.done():
@@ -84,6 +214,7 @@ class WebSocketHub:
         for client in list(self.clients):
             if client.ws.closed:
                 self.clients.discard(client)
+                asyncio.ensure_future(client.close())
                 continue
             client.enqueue(message, critical=critical)
 
@@ -94,17 +225,394 @@ class WebSocketHub:
 
 
 def is_authorized(request: web.Request) -> bool:
-    """Check whether the request carries a valid session token."""
+    """Check whether the request carries a valid Bearer token."""
     config: Config = request.app["config"]
     token = config.session_token
     if not token:
         return True
     header = request.headers.get("Authorization", "")
-    if header.startswith("Bearer "):
-        header_token = header.split(" ", 1)[1].strip()
+    if not header.startswith("Bearer "):
+        return False
+    return header.split(" ", 1)[1].strip() == token
+
+
+# ---------------------------------------------------------------------------
+# Message handler context and dispatch
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MessageContext:
+    """Bundles all state needed by individual message handlers."""
+
+    ws: web.WebSocketResponse
+    store: DeviceStore
+    history: HistoryStore
+    evaluator: AlertEvaluator
+    config: Config
+    authorized: bool
+    peer: str
+    request_id: Optional[str]
+    payload: dict
+
+
+async def _handle_status(ctx: _MessageContext) -> None:
+    snapshot = await ctx.store.snapshot()
+    has_data = any(device.get("last_update") for device in snapshot.values())
+    latest_ts = None
+    if has_data:
+        latest_ts = max(
+            device.get("last_update")
+            for device in snapshot.values()
+            if device.get("last_update")
+        )
+    history_available = await ctx.history.has_history()
+    if latest_ts is None and history_available:
+        latest_ts = await ctx.history.latest_ts()
+
+    any_connected = any(device.get("connected") for device in snapshot.values())
+    any_error = any(device.get("error") for device in snapshot.values())
+
+    if any_error:
+        device_state = "error"
+    elif any_connected and has_data:
+        device_state = "ok"
+    elif any_connected and not has_data:
+        device_state = "warming_up"
     else:
-        header_token = header.strip()
-    return header_token == token
+        device_state = "offline"
+
+    session_state = await ctx.history.get_session_state()
+
+    active_targets: list[dict[str, Any]] = []
+    session_devices: list[dict[str, Any]] = []
+    current_sid = session_state.get("current_session_id")
+    if current_sid is not None:
+        targets = await ctx.history.get_targets(current_sid)
+        active_targets = [t.to_dict() for t in targets]
+        session_devices = await ctx.history.get_session_devices(current_sid)
+
+    status_payload: dict[str, Any] = {
+        "hasData": has_data,
+        "latestTs": latest_ts,
+        "sampleRateHz": round(1.0 / ctx.config.poll_interval, 4),
+        "historyAvailable": history_available,
+        "deviceState": device_state,
+        "currentSessionId": session_state.get("current_session_id"),
+        "currentSessionStartTs": session_state.get("current_session_start_ts"),
+        "lastSessionId": session_state.get("last_session_id"),
+        "sessionTimeoutSeconds": session_state.get("session_timeout_seconds"),
+        "activeTargets": active_targets,
+        "sessionDevices": session_devices,
+    }
+    LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
+             ctx.peer, device_state, has_data, session_state.get("current_session_id"))
+    await send_envelope(ctx.ws, "status", status_payload, request_id=ctx.request_id)
+
+
+async def _handle_sessions(ctx: _MessageContext) -> None:
+    if not isinstance(ctx.payload, dict):
+        await send_error(ctx.ws, "invalid_payload", "sessions_request payload must be an object.", ctx.request_id)
+        return
+
+    limit = ctx.payload.get("limit", 20)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        await send_error(ctx.ws, "invalid_payload", "limit must be an integer.", ctx.request_id)
+        return
+    if limit <= 0:
+        limit = 20
+    if limit > 100:
+        limit = 100
+
+    sessions = await ctx.history.list_sessions(limit)
+    await send_envelope(ctx.ws, "sessions", {"sessions": sessions}, request_id=ctx.request_id)
+
+
+async def _handle_history(ctx: _MessageContext) -> None:
+    if not isinstance(ctx.payload, dict):
+        await send_error(ctx.ws, "invalid_payload", "history_request payload must be an object.", ctx.request_id)
+        return
+
+    since_ts = ctx.payload.get("sinceTs")
+    until_ts = ctx.payload.get("untilTs")
+    limit = ctx.payload.get("limit")
+    session_id = ctx.payload.get("sessionId")
+    chunk_size = ctx.payload.get("chunkSize", 200)
+
+    try:
+        if limit is not None:
+            limit = int(limit)
+        if session_id is not None:
+            session_id = str(session_id)
+        chunk_size = int(chunk_size)
+    except (TypeError, ValueError):
+        await send_error(
+            ctx.ws, "invalid_payload",
+            "limit and chunkSize must be integers.",
+            ctx.request_id,
+        )
+        return
+
+    if limit is not None and limit <= 0:
+        limit = None
+    if limit is None:
+        limit = 10000
+    if limit > 10000:
+        limit = 10000
+    if chunk_size <= 0:
+        chunk_size = 200
+
+    items = await ctx.history.get_history_items(since_ts, until_ts, limit, session_id)
+    count = 0
+    latest_ts = None
+    chunk: List[Dict[str, object]] = []
+    for item in items:
+        chunk.append(item)
+        count += 1
+        latest_ts = item.get("recorded_at") or latest_ts
+        if len(chunk) >= chunk_size:
+            await send_envelope(
+                ctx.ws, "history_chunk", {"items": chunk}, request_id=ctx.request_id,
+            )
+            chunk = []
+    if chunk:
+        await send_envelope(
+            ctx.ws, "history_chunk", {"items": chunk}, request_id=ctx.request_id,
+        )
+    await send_envelope(
+        ctx.ws, "history_end", {"count": count, "latestTs": latest_ts}, request_id=ctx.request_id,
+    )
+
+
+async def _handle_session_start(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to start a new session",
+            request_id=ctx.request_id,
+        )
+        return
+
+    raw_targets = ctx.payload.get("targets", [])
+    targets: list[TargetConfig] = []
+    try:
+        for raw in raw_targets:
+            targets.append(TargetConfig.from_dict(raw))
+    except (KeyError, TypeError, ValueError) as exc:
+        await send_error(
+            ctx.ws, "invalid_payload",
+            f"Invalid target configuration: {exc}",
+            request_id=ctx.request_id,
+        )
+        return
+
+    # Accept deviceAddresses (array) or fall back to deviceAddress (string)
+    device_addresses: list[str] = ctx.payload.get("deviceAddresses", [])
+    if not device_addresses:
+        single = ctx.payload.get("deviceAddress")
+        if single:
+            device_addresses = [single]
+
+    # If still empty, use all currently connected devices
+    if not device_addresses:
+        snapshot = await ctx.store.snapshot()
+        device_addresses = [
+            addr for addr, dev in snapshot.items()
+            if dev.get("connected")
+        ]
+
+    if not device_addresses:
+        await send_error(
+            ctx.ws, "no_devices",
+            "No devices specified and none are currently connected.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_info = await ctx.history.start_session(
+        addresses=device_addresses, reason="user"
+    )
+
+    if session_info.get("end_event"):
+        await ctx.store.publish_event(make_envelope("session_end", session_info["end_event"]))
+    await ctx.store.publish_event(make_envelope("session_start", session_info["start_event"]))
+
+    new_session_id = session_info["session_id"]
+
+    if targets:
+        for addr in device_addresses:
+            await ctx.history.save_targets(new_session_id, addr, targets)
+        ctx.evaluator.set_targets(new_session_id, targets)
+
+    for address in device_addresses:
+        await ctx.store.upsert(
+            address,
+            session_id=new_session_id,
+            session_start_ts=session_info["session_start_ts"],
+        )
+
+    response_payload: dict[str, Any] = {
+        "ok": True,
+        "sessionId": new_session_id,
+        "sessionStartTs": session_info["session_start_ts"],
+        "devices": device_addresses,
+        "targets": [t.to_dict() for t in targets],
+    }
+    await send_envelope(ctx.ws, "session_start_ack", response_payload, request_id=ctx.request_id)
+
+
+async def _handle_session_end(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to end a session",
+            request_id=ctx.request_id,
+        )
+        return
+
+    result = await ctx.history.end_session(reason="user")
+
+    if result is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    ended_session_id = result["sessionId"]
+    ctx.evaluator.clear_session(ended_session_id)
+
+    await ctx.store.publish_event(make_envelope("session_end", result))
+
+    await send_envelope(
+        ctx.ws, "session_end_ack",
+        {
+            "ok": True,
+            "sessionId": ended_session_id,
+            "endedAt": result["sessionEndTs"],
+        },
+        request_id=ctx.request_id,
+    )
+
+
+async def _handle_target_update(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to update targets",
+            request_id=ctx.request_id,
+        )
+        return
+
+    raw_targets = ctx.payload.get("targets", [])
+    target_address = ctx.payload.get("deviceAddress")
+    targets: list[TargetConfig] = []
+    try:
+        for raw in raw_targets:
+            targets.append(TargetConfig.from_dict(raw))
+    except (KeyError, TypeError, ValueError) as exc:
+        await send_error(
+            ctx.ws, "invalid_payload",
+            f"Invalid target configuration: {exc}",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    if not target_address:
+        session_devices = await ctx.history.get_session_devices(current_sid)
+        if session_devices:
+            target_address = session_devices[0]["address"]
+        else:
+            target_address = "all"
+
+    await ctx.history.update_targets(current_sid, target_address, targets)
+    ctx.evaluator.set_targets(current_sid, targets)
+
+    await send_envelope(
+        ctx.ws, "target_update_ack",
+        {
+            "ok": True,
+            "sessionId": current_sid,
+            "targets": [t.to_dict() for t in targets],
+        },
+        request_id=ctx.request_id,
+    )
+
+
+async def _handle_session_add_device(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to modify sessions",
+            request_id=ctx.request_id,
+        )
+        return
+
+    add_address = ctx.payload.get("deviceAddress")
+    if not add_address:
+        await send_error(
+            ctx.ws, "invalid_payload",
+            "deviceAddress is required.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    known_devices = await ctx.store.snapshot()
+    if add_address not in known_devices:
+        await send_error(
+            ctx.ws, "device_not_found",
+            "Device not found. It must be discovered by BLE scan first.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    await ctx.history.add_device_to_session(current_sid, add_address)
+
+    device_joined_payload: dict[str, Any] = {
+        "sessionId": current_sid,
+        "deviceAddress": add_address,
+        "joinedAt": now_iso_utc(),
+    }
+    await ctx.store.publish_event(make_envelope("device_joined", device_joined_payload))
+
+    await send_envelope(
+        ctx.ws, "session_add_device_ack",
+        {
+            "ok": True,
+            "sessionId": current_sid,
+            "deviceAddress": add_address,
+        },
+        request_id=ctx.request_id,
+    )
+
+
+# Map message types to their handler functions.  Each handler receives a
+# _MessageContext and uses ``return`` instead of ``continue`` to abort.
+_MESSAGE_HANDLERS: dict[str, Any] = {
+    "status_request": _handle_status,
+    "sessions_request": _handle_sessions,
+    "history_request": _handle_history,
+    "session_start_request": _handle_session_start,
+    "session_end_request": _handle_session_end,
+    "target_update_request": _handle_target_update,
+    "session_add_device_request": _handle_session_add_device,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +652,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     continue
 
                 msg_version = data.get("v")
-                if msg_version not in (1, 2, PROTOCOL_VERSION):
+                if msg_version != PROTOCOL_VERSION:
                     await send_error(ws, "unsupported_version", "Unsupported message version.")
                     continue
 
@@ -154,372 +662,33 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
                 LOG.info("WS recv from %s: type=%s requestId=%s", peer, msg_type, request_id)
 
-                # -- status_request ----------------------------------------
-                if msg_type == "status_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "status_request requires requestId.")
-                        continue
-
-                    snapshot = await store.snapshot()
-                    has_data = any(device.get("last_update") for device in snapshot.values())
-                    latest_ts = None
-                    if has_data:
-                        latest_ts = max(
-                            device.get("last_update")
-                            for device in snapshot.values()
-                            if device.get("last_update")
-                        )
-                    history_available = await history.has_history()
-                    if latest_ts is None and history_available:
-                        latest_ts = await history.latest_ts()
-
-                    any_connected = any(device.get("connected") for device in snapshot.values())
-                    any_error = any(device.get("error") for device in snapshot.values())
-
-                    if any_error:
-                        device_state = "error"
-                    elif any_connected and has_data:
-                        device_state = "ok"
-                    elif any_connected and not has_data:
-                        device_state = "warming_up"
-                    else:
-                        device_state = "offline"
-
-                    session_state = await history.get_session_state()
-
-                    # Fetch active targets and devices for the current session
-                    active_targets: list[dict[str, Any]] = []
-                    session_devices: list[dict[str, Any]] = []
-                    current_sid = session_state.get("current_session_id")
-                    if current_sid is not None:
-                        targets = await history.get_targets(current_sid)
-                        active_targets = [t.to_dict() for t in targets]
-                        session_devices = await history.get_session_devices(current_sid)
-
-                    status_payload: dict[str, Any] = {
-                        "hasData": has_data,
-                        "latestTs": latest_ts,
-                        "sampleRateHz": round(1.0 / config.poll_interval, 4),
-                        "historyAvailable": history_available,
-                        "deviceState": device_state,
-                        "currentSessionId": session_state.get("current_session_id"),
-                        "currentSessionStartTs": session_state.get("current_session_start_ts"),
-                        "lastSessionId": session_state.get("last_session_id"),
-                        "sessionTimeoutSeconds": session_state.get("session_timeout_seconds"),
-                        "activeTargets": active_targets,
-                        "sessionDevices": session_devices,
-                    }
-                    LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
-                             peer, device_state, has_data, session_state.get("current_session_id"))
-                    await send_envelope(ws, "status", status_payload, request_id=request_id)
-
-                # -- sessions_request --------------------------------------
-                elif msg_type == "sessions_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "sessions_request requires requestId.")
-                        continue
-                    if not isinstance(payload, dict):
-                        await send_error(ws, "invalid_payload", "sessions_request payload must be an object.", request_id)
-                        continue
-
-                    limit = payload.get("limit", 20)
-                    try:
-                        limit = int(limit)
-                    except (TypeError, ValueError):
-                        await send_error(ws, "invalid_payload", "limit must be an integer.", request_id)
-                        continue
-                    if limit <= 0:
-                        limit = 20
-                    if limit > 100:
-                        limit = 100
-
-                    sessions = await history.list_sessions(limit)
-                    await send_envelope(ws, "sessions", {"sessions": sessions}, request_id=request_id)
-
-                # -- history_request ---------------------------------------
-                elif msg_type == "history_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "history_request requires requestId.")
-                        continue
-                    if not isinstance(payload, dict):
-                        await send_error(ws, "invalid_payload", "history_request payload must be an object.", request_id)
-                        continue
-
-                    since_ts = payload.get("sinceTs")
-                    until_ts = payload.get("untilTs")
-                    limit = payload.get("limit")
-                    session_id = payload.get("sessionId")
-                    chunk_size = payload.get("chunkSize", 200)
-
-                    try:
-                        if limit is not None:
-                            limit = int(limit)
-                        if session_id is not None:
-                            session_id = str(session_id)
-                        chunk_size = int(chunk_size)
-                    except (TypeError, ValueError):
+                # Rate-limit session-control messages
+                if msg_type in _SESSION_CONTROL_TYPES:
+                    if not _session_limiter.allow(peer):
                         await send_error(
-                            ws, "invalid_payload",
-                            "limit and chunkSize must be integers.",
-                            request_id,
-                        )
-                        continue
-
-                    if limit is not None and limit <= 0:
-                        limit = None
-                    if chunk_size <= 0:
-                        chunk_size = 200
-
-                    items = await history.get_history_items(since_ts, until_ts, limit, session_id)
-                    count = 0
-                    latest_ts = None
-                    chunk: List[Dict[str, object]] = []
-                    for item in items:
-                        chunk.append(item)
-                        count += 1
-                        latest_ts = item.get("ts") or latest_ts
-                        if len(chunk) >= chunk_size:
-                            await send_envelope(
-                                ws, "history_chunk", {"items": chunk}, request_id=request_id,
-                            )
-                            chunk = []
-                    if chunk:
-                        await send_envelope(
-                            ws, "history_chunk", {"items": chunk}, request_id=request_id,
-                        )
-                    await send_envelope(
-                        ws, "history_end", {"count": count, "latestTs": latest_ts}, request_id=request_id,
-                    )
-
-                # -- session_start_request ---------------------------------
-                elif msg_type == "session_start_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "session_start_request requires requestId.")
-                        continue
-                    if not authorized:
-                        await send_error(
-                            ws, "unauthorized", "Not allowed to start a new session",
+                            ws, "rate_limited",
+                            "Too many session control requests. Try again later.",
                             request_id=request_id,
                         )
                         continue
 
-                    # Parse optional targets from payload
-                    raw_targets = payload.get("targets", [])
-                    targets: list[TargetConfig] = []
-                    try:
-                        for raw in raw_targets:
-                            targets.append(TargetConfig.from_dict(raw))
-                    except (KeyError, TypeError, ValueError) as exc:
-                        await send_error(
-                            ws, "invalid_payload",
-                            f"Invalid target configuration: {exc}",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    # Accept deviceAddresses (array) or fall back to deviceAddress (string)
-                    device_addresses: list[str] = payload.get("deviceAddresses", [])
-                    if not device_addresses:
-                        single = payload.get("deviceAddress")
-                        if single:
-                            device_addresses = [single]
-
-                    # If still empty, use all currently connected devices
-                    if not device_addresses:
-                        snapshot = await store.snapshot()
-                        device_addresses = [
-                            addr for addr, dev in snapshot.items()
-                            if dev.get("connected")
-                        ]
-
-                    if not device_addresses:
-                        await send_error(
-                            ws, "no_devices",
-                            "No devices specified and none are currently connected.",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    session_info = await history.start_session(
-                        addresses=device_addresses, reason="user"
-                    )
-
-                    if session_info.get("end_event"):
-                        await store.publish_event(make_envelope("session_end", session_info["end_event"]))
-                    await store.publish_event(make_envelope("session_start", session_info["start_event"]))
-
-                    new_session_id = session_info["session_id"]
-
-                    # Save and register targets per device address
-                    if targets:
-                        for addr in device_addresses:
-                            await history.save_targets(new_session_id, addr, targets)
-                        evaluator.set_targets(new_session_id, targets)
-
-                    # Update device store with new session info
-                    snapshot = await store.snapshot()
-                    for address in snapshot.keys():
-                        await store.upsert(
-                            address,
-                            session_id=new_session_id,
-                            session_start_ts=session_info["session_start_ts"],
-                        )
-
-                    response_payload: dict[str, Any] = {
-                        "ok": True,
-                        "sessionId": new_session_id,
-                        "sessionStartTs": session_info["session_start_ts"],
-                        "devices": device_addresses,
-                        "targets": [t.to_dict() for t in targets],
-                    }
-                    await send_envelope(ws, "session_start_ack", response_payload, request_id=request_id)
-
-                # -- session_end_request -----------------------------------
-                elif msg_type == "session_end_request":
+                handler = _MESSAGE_HANDLERS.get(msg_type)
+                if handler is not None:
                     if not request_id:
-                        await send_error(ws, "missing_request_id", "session_end_request requires requestId.")
+                        await send_error(ws, "missing_request_id", f"{msg_type} requires requestId.")
                         continue
-                    if not authorized:
-                        await send_error(
-                            ws, "unauthorized", "Not allowed to end a session",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    result = await history.end_session(reason="user")
-
-                    if result is None:
-                        await send_error(
-                            ws, "no_active_session", "No session is currently active.",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    ended_session_id = result["sessionId"]
-                    evaluator.clear_session(ended_session_id)
-
-                    await store.publish_event(make_envelope("session_end", result))
-
-                    await send_envelope(
-                        ws, "session_end_ack",
-                        {
-                            "ok": True,
-                            "sessionId": ended_session_id,
-                            "endedAt": result["sessionEndTs"],
-                        },
+                    ctx = _MessageContext(
+                        ws=ws,
+                        store=store,
+                        history=history,
+                        evaluator=evaluator,
+                        config=config,
+                        authorized=authorized,
+                        peer=peer,
                         request_id=request_id,
+                        payload=payload,
                     )
-
-                # -- target_update_request ---------------------------------
-                elif msg_type == "target_update_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "target_update_request requires requestId.")
-                        continue
-                    if not authorized:
-                        await send_error(
-                            ws, "unauthorized", "Not allowed to update targets",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    raw_targets = payload.get("targets", [])
-                    target_address = payload.get("deviceAddress")
-                    targets = []
-                    try:
-                        for raw in raw_targets:
-                            targets.append(TargetConfig.from_dict(raw))
-                    except (KeyError, TypeError, ValueError) as exc:
-                        await send_error(
-                            ws, "invalid_payload",
-                            f"Invalid target configuration: {exc}",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    session_state = await history.get_session_state()
-                    current_sid = session_state.get("current_session_id")
-                    if current_sid is None:
-                        await send_error(
-                            ws, "no_active_session", "No session is currently active.",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    sid = current_sid
-
-                    # Determine which device address to update targets for
-                    if not target_address:
-                        # Fall back to first device in session
-                        session_devices = await history.get_session_devices(sid)
-                        if session_devices:
-                            target_address = session_devices[0]["address"]
-                        else:
-                            target_address = "all"
-
-                    await history.update_targets(sid, target_address, targets)
-                    evaluator.set_targets(sid, targets)
-
-                    await send_envelope(
-                        ws, "target_update_ack",
-                        {
-                            "ok": True,
-                            "sessionId": sid,
-                            "targets": [t.to_dict() for t in targets],
-                        },
-                        request_id=request_id,
-                    )
-
-                # -- session_add_device_request -----------------------------
-                elif msg_type == "session_add_device_request":
-                    if not request_id:
-                        await send_error(ws, "missing_request_id", "session_add_device_request requires requestId.")
-                        continue
-                    if not authorized:
-                        await send_error(
-                            ws, "unauthorized", "Not allowed to modify sessions",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    add_address = payload.get("deviceAddress")
-                    if not add_address:
-                        await send_error(
-                            ws, "invalid_payload",
-                            "deviceAddress is required.",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    session_state = await history.get_session_state()
-                    current_sid = session_state.get("current_session_id")
-                    if current_sid is None:
-                        await send_error(
-                            ws, "no_active_session", "No session is currently active.",
-                            request_id=request_id,
-                        )
-                        continue
-
-                    await history.add_device_to_session(current_sid, add_address)
-
-                    # Broadcast device_joined event
-                    device_joined_payload: dict[str, Any] = {
-                        "sessionId": current_sid,
-                        "deviceAddress": add_address,
-                        "joinedAt": now_iso_utc(),
-                    }
-                    await store.publish_event(make_envelope("device_joined", device_joined_payload))
-
-                    await send_envelope(
-                        ws, "session_add_device_ack",
-                        {
-                            "ok": True,
-                            "sessionId": current_sid,
-                            "deviceAddress": add_address,
-                        },
-                        request_id=request_id,
-                    )
-
-                # -- unknown -----------------------------------------------
+                    await handler(ctx)
                 else:
                     await send_error(
                         ws, "unknown_type",

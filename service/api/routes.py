@@ -8,7 +8,7 @@ import time
 from aiohttp import web
 
 from service.config import Config
-from service.history.store import HistoryStore, now_iso
+from service.history.store import HistoryStore
 from service.models.device import DeviceStore
 
 LOG = logging.getLogger("igrill.http")
@@ -17,23 +17,6 @@ LOG = logging.getLogger("igrill.http")
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
-
-
-async def metrics_handler(request: web.Request) -> web.Response:
-    """Serve Prometheus text format metrics, or fall back to JSON device snapshot."""
-    metrics = request.app.get("metrics")
-    if metrics:
-        return web.Response(text=metrics.render(), content_type="text/plain")
-    # Fallback: return device snapshot as JSON (backwards compat)
-    store: DeviceStore = request.app["store"]
-    snapshot = await store.snapshot()
-    return web.json_response(
-        {
-            "generated_at": now_iso(),
-            "device_count": len(snapshot),
-            "devices": list(snapshot.values()),
-        }
-    )
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -61,8 +44,13 @@ async def health_handler(request: web.Request) -> web.Response:
 async def sessions_handler(request: web.Request) -> web.Response:
     """GET /api/sessions — paginated session list."""
     history: HistoryStore = request.app["history"]
-    limit = int(request.query.get("limit", "20"))
-    offset = int(request.query.get("offset", "0"))
+    try:
+        limit = int(request.query.get("limit", "20"))
+        offset = int(request.query.get("offset", "0"))
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"error": "limit and offset must be integers"}, status=400,
+        )
     if limit <= 0:
         limit = 20
     if limit > 100:
@@ -77,6 +65,8 @@ async def session_detail_handler(request: web.Request) -> web.Response:
     """GET /api/sessions/{id} — session detail with readings."""
     history: HistoryStore = request.app["history"]
     session_id = request.match_info["id"]
+    if not await history.session_exists(session_id):
+        return web.json_response({"error": "session not found"}, status=404)
     readings = await history.get_session_readings(session_id)
     targets = await history.get_targets(session_id)
     devices = await history.get_session_devices(session_id)
@@ -93,10 +83,18 @@ async def log_levels_handler(request: web.Request) -> web.Response:
     from service.api.websocket import is_authorized
     if not is_authorized(request):
         return web.json_response({"error": "unauthorised"}, status=401)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
     from service.logging_setup import update_log_level
     results = {}
     for logger_name, level in body.items():
+        if not isinstance(level, str):
+            results[logger_name] = False
+            continue
         results[logger_name] = update_log_level(logger_name, level)
     return web.json_response({"results": results})
 
@@ -110,7 +108,6 @@ def setup_routes(app: web.Application) -> None:
     """Register all HTTP and WebSocket routes on *app*."""
     from service.api.websocket import websocket_handler
 
-    app.router.add_get("/metrics", metrics_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/sessions", sessions_handler)

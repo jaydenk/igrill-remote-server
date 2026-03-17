@@ -1,8 +1,8 @@
 TODO.md
+AGENTS.md
+docs/API_CONTRACT.md
 __pycache__/
 *.pyc
 .pytest_cache/
-__pycache__/
-*.pyc
-.pytest_cache/
-TODO.md
+.DS_Store
+.env

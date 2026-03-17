@@ -5,7 +5,10 @@ from typing import Dict, Optional
 
 
 class DeviceStore:
-    """Thread-safe in-memory store for discovered iGrill device state.
+    """Async-safe in-memory store for discovered iGrill device state.
+
+    Concurrency is managed via :class:`asyncio.Lock`, which serialises
+    access within a single event loop (not across OS threads).
 
     Each device is keyed by its BLE MAC address and carries the full set of
     fields that the rest of the system queries (connection status, probe
