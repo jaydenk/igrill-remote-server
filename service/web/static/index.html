@@ -1483,7 +1483,25 @@
       },
       scales: {
         x: { time: true },
-        y: { auto: true }
+        y: {
+          auto: true,
+          range: function(u, dataMin, dataMax) {
+            var lo = dataMin;
+            var hi = dataMax;
+            for (var t = 0; t < targetLines.length; t++) {
+              var tgt = targetLines[t];
+              if (tgt.mode === "range") {
+                if (tgt.low != null) lo = Math.min(lo, tgt.low);
+                if (tgt.high != null) hi = Math.max(hi, tgt.high);
+              } else if (tgt.value != null) {
+                lo = Math.min(lo, tgt.value);
+                hi = Math.max(hi, tgt.value);
+              }
+            }
+            var pad = (hi - lo) * 0.05 || 1;
+            return [lo - pad, hi + pad];
+          }
+        }
       },
       axes: [
         {
@@ -2659,7 +2677,25 @@
       cursor: { drag: { x: false, y: false } },
       scales: {
         x: { time: true },
-        y: { auto: true }
+        y: {
+          auto: true,
+          range: function(u, dataMin, dataMax) {
+            var lo = dataMin;
+            var hi = dataMax;
+            for (var t = 0; t < targetLines.length; t++) {
+              var tgt = targetLines[t];
+              if (tgt.mode === "range") {
+                if (tgt.low != null) lo = Math.min(lo, tgt.low);
+                if (tgt.high != null) hi = Math.max(hi, tgt.high);
+              } else if (tgt.value != null) {
+                lo = Math.min(lo, tgt.value);
+                hi = Math.max(hi, tgt.value);
+              }
+            }
+            var pad = (hi - lo) * 0.05 || 1;
+            return [lo - pad, hi + pad];
+          }
+        }
       },
       axes: [
         {
