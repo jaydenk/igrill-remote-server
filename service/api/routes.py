@@ -7,6 +7,7 @@ import time
 
 from aiohttp import web
 
+from service.config import Config
 from service.history.store import HistoryStore, now_iso
 from service.models.device import DeviceStore
 
@@ -35,20 +36,6 @@ async def metrics_handler(request: web.Request) -> web.Response:
     )
 
 
-async def history_handler(request: web.Request) -> web.Response:
-    """Return session history, optionally filtered by MAC address."""
-    history: HistoryStore = request.app["history"]
-    address = request.query.get("mac")
-    sessions = await history.get_history(address)
-    return web.json_response(
-        {
-            "generated_at": now_iso(),
-            "session_count": len(sessions),
-            "sessions": sessions,
-        }
-    )
-
-
 async def health_handler(request: web.Request) -> web.Response:
     """Lightweight health check endpoint."""
     store: DeviceStore = request.app["store"]
@@ -56,6 +43,7 @@ async def health_handler(request: web.Request) -> web.Response:
     devices = await store.snapshot()
     connected = sum(1 for d in devices.values() if d.get("connected"))
     session_state = await history.get_session_state()
+    config: Config = request.app["config"]
     return web.json_response(
         {
             "status": "ok",
@@ -64,8 +52,53 @@ async def health_handler(request: web.Request) -> web.Response:
             "devices_connected": connected,
             "active_session_id": session_state.get("current_session_id"),
             "ble_adapter": "bluez",
+            "poll_interval": config.poll_interval,
+            "scan_interval": config.scan_interval,
         }
     )
+
+
+async def sessions_handler(request: web.Request) -> web.Response:
+    """GET /api/sessions — paginated session list."""
+    history: HistoryStore = request.app["history"]
+    limit = int(request.query.get("limit", "20"))
+    offset = int(request.query.get("offset", "0"))
+    if limit <= 0:
+        limit = 20
+    if limit > 100:
+        limit = 100
+    if offset < 0:
+        offset = 0
+    sessions = await history.list_sessions(limit=limit, offset=offset)
+    return web.json_response({"sessions": sessions})
+
+
+async def session_detail_handler(request: web.Request) -> web.Response:
+    """GET /api/sessions/{id} — session detail with readings."""
+    history: HistoryStore = request.app["history"]
+    session_id = request.match_info["id"]
+    readings = await history.get_session_readings(session_id)
+    targets = await history.get_targets(session_id)
+    devices = await history.get_session_devices(session_id)
+    return web.json_response({
+        "sessionId": session_id,
+        "devices": devices,
+        "targets": [t.to_dict() for t in targets],
+        "readings": readings,
+    })
+
+
+async def log_levels_handler(request: web.Request) -> web.Response:
+    """PUT /api/config/log-levels — runtime log level update."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+    body = await request.json()
+    from service.logging_setup import update_log_level
+    results = {}
+    for logger_name, level in body.items():
+        results[logger_name] = update_log_level(logger_name, level)
+    return web.json_response({"results": results})
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +111,8 @@ def setup_routes(app: web.Application) -> None:
     from service.api.websocket import websocket_handler
 
     app.router.add_get("/metrics", metrics_handler)
-    app.router.add_get("/history", history_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ws", websocket_handler)
+    app.router.add_get("/api/sessions", sessions_handler)
+    app.router.add_get("/api/sessions/{id}", session_detail_handler)
+    app.router.add_put("/api/config/log-levels", log_levels_handler)

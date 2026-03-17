@@ -470,6 +470,257 @@
       font-size: 1rem;
     }
 
+    /* -- History Tab ---------------------------------------------------- */
+
+    .history-layout {
+      display: flex;
+      gap: 1.5rem;
+    }
+
+    .history-list-pane {
+      flex: 0 0 340px;
+      max-height: calc(100vh - 160px);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .history-detail-pane {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .history-detail-pane.hidden {
+      display: none;
+    }
+
+    .session-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.85rem 1rem;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .session-card:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .session-card.selected {
+      border-color: var(--accent);
+    }
+
+    .session-card-date {
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .session-card-meta {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      flex-wrap: wrap;
+    }
+
+    .session-card-meta span {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .session-card-devices {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.35rem;
+    }
+
+    .history-back-btn {
+      display: none;
+      margin-bottom: 0.75rem;
+    }
+
+    .history-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .history-summary-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.75rem 1rem;
+    }
+
+    .history-summary-card .summary-probe-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+
+    .history-summary-card .summary-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      padding: 0.15rem 0;
+    }
+
+    .history-summary-card .summary-row .summary-label {
+      color: var(--text-secondary);
+    }
+
+    .history-summary-card .summary-row .summary-value {
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .history-detail-header {
+      margin-bottom: 1rem;
+    }
+
+    .history-detail-header h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .history-detail-header .detail-meta {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+    }
+
+    .history-empty {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-muted);
+    }
+
+    /* -- Settings Tab --------------------------------------------------- */
+
+    .settings-section {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+    }
+
+    .settings-section-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    .settings-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.45rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.88rem;
+    }
+
+    .settings-row:last-child {
+      border-bottom: none;
+    }
+
+    .settings-row .settings-label {
+      color: var(--text-secondary);
+    }
+
+    .settings-row .settings-value {
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .settings-device-card {
+      background: var(--bg-card);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .settings-device-card:last-child {
+      margin-bottom: 0;
+    }
+
+    .settings-device-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.15rem;
+    }
+
+    .settings-device-detail {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .log-level-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .log-level-row:last-child {
+      border-bottom: none;
+    }
+
+    .log-level-row .log-logger-name {
+      font-size: 0.85rem;
+      color: var(--text-primary);
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    }
+
+    .log-level-row select {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      padding: 0.3rem 0.5rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: border-color 0.3s;
+    }
+
+    .log-level-row select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .log-level-row select.flash-success {
+      border-color: var(--green);
+      box-shadow: 0 0 4px rgba(74, 222, 128, 0.4);
+    }
+
+    .log-level-row select.flash-error {
+      border-color: var(--red);
+      box-shadow: 0 0 4px rgba(248, 113, 113, 0.4);
+    }
+
+    .settings-no-devices {
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      font-style: italic;
+      padding: 0.5rem 0;
+    }
+
     /* -- Modal / Overlay ------------------------------------------------ */
 
     .modal-overlay {
@@ -623,6 +874,30 @@
       .modal {
         margin: 0.5rem;
       }
+
+      /* History: stack list and detail vertically */
+      .history-layout {
+        flex-direction: column;
+      }
+
+      .history-list-pane {
+        flex: none;
+        max-height: none;
+        overflow-y: visible;
+      }
+
+      /* On mobile, when detail is shown, hide list */
+      .history-list-pane.mobile-hidden {
+        display: none;
+      }
+
+      .history-back-btn {
+        display: inline-flex;
+      }
+
+      .history-summary-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -697,14 +972,99 @@
 <!-- History Tab                                                         -->
 <!-- ================================================================== -->
 <div class="tab-content" id="tab-history">
-  <div class="placeholder">History &mdash; coming soon</div>
+  <div class="history-layout">
+    <!-- Session List -->
+    <div class="history-list-pane" id="historyListPane">
+      <div class="section-title">Past Sessions</div>
+      <div id="historySessionList">
+        <div class="history-empty" id="historyEmpty">
+          <p>No past sessions found.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session Detail -->
+    <div class="history-detail-pane hidden" id="historyDetailPane">
+      <button class="btn btn-ghost history-back-btn" id="historyBackBtn">&larr; Back to list</button>
+      <div class="history-detail-header" id="historyDetailHeader"></div>
+      <div class="section-title">Temperature Charts</div>
+      <div class="chart-container" id="historyCombinedChartContainer">
+        <div class="chart-title">All Probes</div>
+        <div class="chart-wrapper" id="historyCombinedChartWrapper"></div>
+      </div>
+      <div class="per-probe-charts" id="historyPerProbeCharts"></div>
+      <div class="section-title" style="margin-top:1rem;">Summary Statistics</div>
+      <div class="history-summary-grid" id="historySummaryGrid"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ================================================================== -->
 <!-- Settings Tab                                                        -->
 <!-- ================================================================== -->
 <div class="tab-content" id="tab-settings">
-  <div class="placeholder">Settings &mdash; coming soon</div>
+
+  <!-- Connected Devices -->
+  <section class="settings-section">
+    <div class="settings-section-title">Connected Devices</div>
+    <div id="settingsDeviceList">
+      <p class="settings-no-devices">No devices discovered yet.</p>
+    </div>
+  </section>
+
+  <!-- Server Info -->
+  <section class="settings-section">
+    <div class="settings-section-title">Server Information</div>
+    <div id="settingsServerInfo">
+      <div class="settings-row">
+        <span class="settings-label">Uptime</span>
+        <span class="settings-value" id="settingsUptime">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Poll Interval</span>
+        <span class="settings-value" id="settingsPollInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Scan Interval</span>
+        <span class="settings-value" id="settingsScanInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Total</span>
+        <span class="settings-value" id="settingsDevicesTotal">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Connected</span>
+        <span class="settings-value" id="settingsDevicesConnected">&mdash;</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Log Level Controls -->
+  <section class="settings-section">
+    <div class="settings-section-title">Log Levels</div>
+    <div id="settingsLogLevels">
+      <div class="log-level-row" data-logger="igrill.ble">
+        <span class="log-logger-name">igrill.ble</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.ws">
+        <span class="log-logger-name">igrill.ws</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.session">
+        <span class="log-logger-name">igrill.session</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.alert">
+        <span class="log-logger-name">igrill.alert</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.http">
+        <span class="log-logger-name">igrill.http</span>
+        <select></select>
+      </div>
+    </div>
+  </section>
 </div>
 
 <!-- ================================================================== -->
@@ -795,6 +1155,13 @@
       btn.classList.add("active");
       var panel = document.getElementById("tab-" + target);
       if (panel) panel.classList.add("active");
+
+      if (target === "history") {
+        fetchHistorySessions();
+      } else if (target === "settings") {
+        refreshSettingsDevices();
+        fetchServerHealth();
+      }
     });
   });
 
@@ -1410,16 +1777,31 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
       if (!uplotAvailable) return;
+      /* Resize live charts */
       var w = combinedChartWrapper.clientWidth;
-      if (w <= 0) return;
-      if (combinedChart) {
-        combinedChart.resize(w, 280);
+      if (w > 0) {
+        if (combinedChart) {
+          combinedChart.resize(w, 280);
+        }
+        var pKeys = Object.keys(perProbeCharts);
+        for (var k = 0; k < pKeys.length; k++) {
+          var chartEl = perProbeChartsEl.querySelector("[data-probe-index='" + pKeys[k] + "'] .chart-wrapper");
+          var cw = chartEl ? chartEl.clientWidth : w;
+          perProbeCharts[pKeys[k]].resize(cw, 220);
+        }
       }
-      var pKeys = Object.keys(perProbeCharts);
-      for (var k = 0; k < pKeys.length; k++) {
-        var chartEl = perProbeChartsEl.querySelector("[data-probe-index='" + pKeys[k] + "'] .chart-wrapper");
-        var cw = chartEl ? chartEl.clientWidth : w;
-        perProbeCharts[pKeys[k]].resize(cw, 220);
+      /* Resize history charts */
+      if (historyCombinedChart) {
+        var hw = historyCombinedChartWrapper.clientWidth;
+        if (hw > 0) {
+          historyCombinedChart.resize(hw, 280);
+          var hpKeys = Object.keys(historyPerProbeCharts);
+          for (var hk = 0; hk < hpKeys.length; hk++) {
+            var hChartEl = historyPerProbeChartsEl.querySelector("[data-probe-index='" + hpKeys[hk] + "'] .chart-wrapper");
+            var hcw = hChartEl ? hChartEl.clientWidth : hw;
+            historyPerProbeCharts[hpKeys[hk]].resize(hcw, 220);
+          }
+        }
       }
     }, 200);
   });
@@ -1886,6 +2268,674 @@
       probeAlertStates[key] = level;
     }
     renderDevices();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* History Tab                                                         */
+  /* ------------------------------------------------------------------ */
+
+  var historyListPane       = document.getElementById("historyListPane");
+  var historyDetailPane     = document.getElementById("historyDetailPane");
+  var historySessionList    = document.getElementById("historySessionList");
+  var historyEmpty          = document.getElementById("historyEmpty");
+  var historyBackBtn        = document.getElementById("historyBackBtn");
+  var historyDetailHeader   = document.getElementById("historyDetailHeader");
+  var historyCombinedChartWrapper = document.getElementById("historyCombinedChartWrapper");
+  var historyPerProbeChartsEl    = document.getElementById("historyPerProbeCharts");
+  var historySummaryGrid    = document.getElementById("historySummaryGrid");
+
+  var historyCombinedChart  = null;
+  var historyPerProbeCharts = {};
+  var selectedHistorySessionId = null;
+
+  historyBackBtn.addEventListener("click", function () {
+    showHistoryList();
+  });
+
+  function showHistoryList() {
+    selectedHistorySessionId = null;
+    historyDetailPane.classList.add("hidden");
+    historyListPane.classList.remove("mobile-hidden");
+    destroyHistoryCharts();
+    /* Deselect all cards */
+    var cards = historySessionList.querySelectorAll(".session-card");
+    cards.forEach(function (c) { c.classList.remove("selected"); });
+  }
+
+  function showHistoryDetail() {
+    historyDetailPane.classList.remove("hidden");
+    historyListPane.classList.add("mobile-hidden");
+  }
+
+  function destroyHistoryCharts() {
+    if (historyCombinedChart) {
+      historyCombinedChart.destroy();
+      historyCombinedChart = null;
+    }
+    var keys = Object.keys(historyPerProbeCharts);
+    for (var i = 0; i < keys.length; i++) {
+      historyPerProbeCharts[keys[i]].destroy();
+    }
+    historyPerProbeCharts = {};
+    historyCombinedChartWrapper.textContent = "";
+    historyPerProbeChartsEl.textContent = "";
+    historySummaryGrid.textContent = "";
+  }
+
+  function formatHistoryDate(isoString) {
+    if (!isoString) return "\u2014";
+    var d = new Date(isoString);
+    if (isNaN(d.getTime())) return "\u2014";
+    return d.toLocaleString("en-AU", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }
+
+  function formatHistoryDuration(startIso, endIso) {
+    if (!startIso) return "\u2014";
+    var start = new Date(startIso);
+    var end = endIso ? new Date(endIso) : new Date();
+    if (isNaN(start.getTime())) return "\u2014";
+    var diff = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+    var h = Math.floor(diff / 3600);
+    var m = Math.floor((diff % 3600) / 60);
+    var s = diff % 60;
+    var parts = [];
+    if (h > 0) parts.push(h + "h");
+    parts.push(m + "m");
+    if (h === 0) parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  function fetchHistorySessions() {
+    fetch("/api/sessions?limit=20")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        renderHistorySessions(data.sessions || []);
+      })
+      .catch(function (err) {
+        console.warn("[iGrill] Failed to fetch sessions:", err);
+      });
+  }
+
+  function renderHistorySessions(sessions) {
+    /* Clear existing cards but keep the empty placeholder */
+    var existing = historySessionList.querySelectorAll(".session-card");
+    existing.forEach(function (c) { c.remove(); });
+
+    if (sessions.length === 0) {
+      historyEmpty.style.display = "";
+      return;
+    }
+    historyEmpty.style.display = "none";
+
+    sessions.forEach(function (s) {
+      var card = document.createElement("div");
+      card.className = "session-card";
+      card.dataset.sessionId = s.sessionId;
+
+      if (s.sessionId === selectedHistorySessionId) {
+        card.classList.add("selected");
+      }
+
+      var dateEl = el("div", "session-card-date", formatHistoryDate(s.startTs));
+      card.appendChild(dateEl);
+
+      var metaEl = el("div", "session-card-meta");
+      metaEl.appendChild(el("span", null, "Duration: " + formatHistoryDuration(s.startTs, s.endTs)));
+      if (s.endReason) {
+        metaEl.appendChild(el("span", null, "End: " + s.endReason));
+      }
+      if (s.readingCount != null) {
+        metaEl.appendChild(el("span", null, s.readingCount + " readings"));
+      }
+      card.appendChild(metaEl);
+
+      if (s.devices && s.devices.length > 0) {
+        var devNames = s.devices.map(function (d) {
+          return d.name || d.address;
+        }).join(", ");
+        card.appendChild(el("div", "session-card-devices", devNames));
+      }
+
+      card.addEventListener("click", function () {
+        /* Deselect others */
+        var allCards = historySessionList.querySelectorAll(".session-card");
+        allCards.forEach(function (c) { c.classList.remove("selected"); });
+        card.classList.add("selected");
+        selectedHistorySessionId = s.sessionId;
+        loadHistoryDetail(s.sessionId, s);
+      });
+
+      historySessionList.appendChild(card);
+    });
+  }
+
+  function loadHistoryDetail(sessionId, sessionMeta) {
+    destroyHistoryCharts();
+    showHistoryDetail();
+
+    /* Render header */
+    historyDetailHeader.textContent = "";
+    var h3 = el("h3", null, "Session — " + formatHistoryDate(sessionMeta.startTs));
+    historyDetailHeader.appendChild(h3);
+
+    var metaDiv = el("div", "detail-meta");
+    metaDiv.appendChild(el("span", null, "Duration: " + formatHistoryDuration(sessionMeta.startTs, sessionMeta.endTs)));
+    if (sessionMeta.endReason) {
+      metaDiv.appendChild(el("span", null, "End reason: " + sessionMeta.endReason));
+    }
+    if (sessionMeta.devices && sessionMeta.devices.length > 0) {
+      var devNames = sessionMeta.devices.map(function (d) {
+        return d.name || d.address;
+      }).join(", ");
+      metaDiv.appendChild(el("span", null, "Devices: " + devNames));
+    }
+    historyDetailHeader.appendChild(metaDiv);
+
+    /* Fetch full session data */
+    fetch("/api/sessions/" + encodeURIComponent(sessionId))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        renderHistoryCharts(data);
+      })
+      .catch(function (err) {
+        console.warn("[iGrill] Failed to fetch session detail:", err);
+        historyDetailHeader.appendChild(el("p", "history-empty", "Failed to load session data."));
+      });
+  }
+
+  function renderHistoryCharts(data) {
+    if (!uplotAvailable) return;
+
+    var readings = data.readings || [];
+    var targets = data.targets || [];
+    if (readings.length === 0) {
+      historySummaryGrid.appendChild(el("p", "history-empty", "No readings recorded for this session."));
+      return;
+    }
+
+    /* Group readings by timestamp to combine probes */
+    var grouped = {};
+    var probeIndicesSet = new Set();
+    for (var i = 0; i < readings.length; i++) {
+      var r = readings[i];
+      var key = r.recorded_at + "|" + r.address;
+      if (!grouped[key]) {
+        grouped[key] = { ts: r.recorded_at, probes: {} };
+      }
+      if (r.temperature != null) {
+        grouped[key].probes[r.probe_index] = r.temperature;
+        probeIndicesSet.add(r.probe_index);
+      }
+    }
+
+    var entries = Object.values(grouped);
+    entries.sort(function (a, b) {
+      return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
+    });
+
+    /* Build probe configs */
+    var sortedProbes = Array.from(probeIndicesSet).sort(function (a, b) { return a - b; });
+    var probeConfigs = [];
+    for (var p = 0; p < sortedProbes.length; p++) {
+      var idx = sortedProbes[p];
+      probeConfigs.push({
+        index: idx,
+        label: "Probe " + idx,
+        color: PROBE_COLOURS[(idx - 1) % PROBE_COLOURS.length]
+      });
+    }
+
+    /* Build chart targets */
+    var chartTargets = [];
+    for (var t = 0; t < targets.length; t++) {
+      var tgt = targets[t];
+      chartTargets.push({
+        probeIndex: tgt.probe_index,
+        mode: tgt.mode || "fixed",
+        value: tgt.target_value != null ? tgt.target_value : null,
+        low: tgt.range_low != null ? tgt.range_low : null,
+        high: tgt.range_high != null ? tgt.range_high : null
+      });
+    }
+
+    var containerWidth = historyCombinedChartWrapper.clientWidth || 400;
+
+    /* Create combined chart (non-auto-scrolling — feed all data at once) */
+    historyCombinedChart = createHistoryChart(historyCombinedChartWrapper, {
+      probes: probeConfigs,
+      width: containerWidth,
+      height: 280,
+      targets: chartTargets
+    });
+
+    /* Feed all data */
+    for (var d = 0; d < entries.length; d++) {
+      var entry = entries[d];
+      var epochSec = new Date(entry.ts).getTime() / 1000;
+      if (!isNaN(epochSec)) {
+        historyCombinedChart.addReading(epochSec, entry.probes);
+      }
+    }
+
+    /* Per-probe charts */
+    for (var pp = 0; pp < probeConfigs.length; pp++) {
+      var pc = probeConfigs[pp];
+      var wrapper = document.createElement("div");
+      wrapper.className = "chart-container";
+      wrapper.dataset.probeIndex = pc.index;
+      wrapper.appendChild(el("div", "chart-title", pc.label));
+      var chartW = document.createElement("div");
+      chartW.className = "chart-wrapper";
+      wrapper.appendChild(chartW);
+      historyPerProbeChartsEl.appendChild(wrapper);
+
+      var probeTargets = [];
+      for (var pt = 0; pt < chartTargets.length; pt++) {
+        if (chartTargets[pt].probeIndex === pc.index) {
+          probeTargets.push(chartTargets[pt]);
+        }
+      }
+
+      historyPerProbeCharts[pc.index] = createHistoryChart(chartW, {
+        probes: [pc],
+        width: chartW.clientWidth || containerWidth,
+        height: 220,
+        targets: probeTargets
+      });
+
+      for (var dd = 0; dd < entries.length; dd++) {
+        var e2 = entries[dd];
+        var ep2 = new Date(e2.ts).getTime() / 1000;
+        if (!isNaN(ep2)) {
+          var single = {};
+          single[pc.index] = e2.probes[pc.index] != null ? e2.probes[pc.index] : null;
+          historyPerProbeCharts[pc.index].addReading(ep2, single);
+        }
+      }
+    }
+
+    /* Summary stats */
+    renderHistorySummary(entries, sortedProbes, targets);
+  }
+
+  /**
+   * Create a temperature chart for history (no auto-scrolling window).
+   * Almost identical to createTemperatureChart but without the trimming logic.
+   */
+  function createHistoryChart(container, options) {
+    if (!uplotAvailable) {
+      return { addReading: function(){}, setTargets: function(){}, destroy: function(){}, resize: function(){} };
+    }
+
+    var probes = options.probes || [];
+    var targets = options.targets || [];
+    var chartWidth = options.width || container.clientWidth || 400;
+    var chartHeight = options.height || 250;
+
+    var timestamps = [];
+    var seriesData = [];
+    for (var i = 0; i < probes.length; i++) {
+      seriesData.push([]);
+    }
+
+    var computedStyle = getComputedStyle(document.documentElement);
+    var textSecondary = computedStyle.getPropertyValue("--text-secondary").trim() || "#a0a0b8";
+    var borderColor = computedStyle.getPropertyValue("--border").trim() || "#2a2a4a";
+
+    var seriesConfig = [{ label: "Time" }];
+    for (var j = 0; j < probes.length; j++) {
+      seriesConfig.push({
+        label: probes[j].label,
+        stroke: probes[j].color,
+        width: 2,
+        paths: uPlot.paths.linear(),
+        points: { show: false }
+      });
+    }
+
+    var targetLines = targets.slice();
+
+    function drawTargetLines(u) {
+      var ctx = u.ctx;
+      ctx.save();
+      var plotLeft = u.bbox.left / devicePixelRatio;
+      var plotTop = u.bbox.top / devicePixelRatio;
+      var plotWidth = u.bbox.width / devicePixelRatio;
+      var plotHeight = u.bbox.height / devicePixelRatio;
+
+      for (var t = 0; t < targetLines.length; t++) {
+        var tgt = targetLines[t];
+        var tgtColor = "#888";
+        for (var p = 0; p < probes.length; p++) {
+          if (probes[p].index === tgt.probeIndex) {
+            tgtColor = probes[p].color;
+            break;
+          }
+        }
+        ctx.strokeStyle = tgtColor;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.globalAlpha = 0.7;
+
+        var drawLine = function(val) {
+          if (val == null) return;
+          var yPos = u.valToPos(val, "y", true);
+          if (yPos >= plotTop && yPos <= plotTop + plotHeight) {
+            ctx.beginPath();
+            ctx.moveTo(plotLeft, yPos);
+            ctx.lineTo(plotLeft + plotWidth, yPos);
+            ctx.stroke();
+          }
+        };
+
+        if (tgt.mode === "range") {
+          drawLine(tgt.low);
+          drawLine(tgt.high);
+        } else {
+          drawLine(tgt.value);
+        }
+      }
+      ctx.restore();
+    }
+
+    var targetPlugin = { hooks: { draw: [drawTargetLines] } };
+
+    var opts = {
+      width: chartWidth,
+      height: chartHeight,
+      plugins: [targetPlugin],
+      cursor: { drag: { x: false, y: false } },
+      scales: {
+        x: { time: true },
+        y: { auto: true }
+      },
+      axes: [
+        {
+          stroke: textSecondary,
+          grid: { stroke: borderColor, width: 1 },
+          ticks: { stroke: borderColor, width: 1 },
+          font: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          labelFont: "11px -apple-system, BlinkMacSystemFont, sans-serif"
+        },
+        {
+          stroke: textSecondary,
+          grid: { stroke: borderColor, width: 1 },
+          ticks: { stroke: borderColor, width: 1 },
+          font: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          labelFont: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          label: "\u00B0C",
+          size: 50
+        }
+      ],
+      series: seriesConfig
+    };
+
+    var plotData = [timestamps].concat(seriesData);
+    var plot = new uPlot(opts, plotData, container);
+
+    return {
+      addReading: function(timestamp, probeTemps) {
+        timestamps.push(timestamp);
+        for (var s = 0; s < probes.length; s++) {
+          var temp = probeTemps[probes[s].index];
+          seriesData[s].push(temp != null ? temp : null);
+        }
+        /* No auto-trim — show the full session timeline */
+        var newData = [timestamps].concat(seriesData);
+        plot.setData(newData);
+      },
+      setTargets: function(newTargets) {
+        targetLines = newTargets.slice();
+        plot.redraw();
+      },
+      destroy: function() {
+        plot.destroy();
+      },
+      resize: function(w, h) {
+        plot.setSize({ width: w, height: h || chartHeight });
+      }
+    };
+  }
+
+  function renderHistorySummary(entries, probeIndices, targets) {
+    historySummaryGrid.textContent = "";
+
+    for (var p = 0; p < probeIndices.length; p++) {
+      var probeIdx = probeIndices[p];
+      var temps = [];
+      var firstTs = null;
+      var targetReachedTs = null;
+
+      /* Find target for this probe */
+      var probeTarget = null;
+      for (var t = 0; t < targets.length; t++) {
+        if (targets[t].probe_index === probeIdx) {
+          probeTarget = targets[t];
+          break;
+        }
+      }
+
+      for (var e = 0; e < entries.length; e++) {
+        var temp = entries[e].probes[probeIdx];
+        if (temp != null) {
+          temps.push(temp);
+          if (firstTs == null) {
+            firstTs = entries[e].ts;
+          }
+          /* Check if target reached */
+          if (probeTarget && targetReachedTs == null) {
+            var reached = false;
+            if (probeTarget.mode === "range") {
+              if (probeTarget.range_low != null && probeTarget.range_high != null) {
+                reached = temp >= probeTarget.range_low && temp <= probeTarget.range_high;
+              }
+            } else if (probeTarget.target_value != null) {
+              reached = temp >= probeTarget.target_value;
+            }
+            if (reached) {
+              targetReachedTs = entries[e].ts;
+            }
+          }
+        }
+      }
+
+      if (temps.length === 0) continue;
+
+      var minTemp = Math.min.apply(null, temps);
+      var maxTemp = Math.max.apply(null, temps);
+      var avgTemp = temps.reduce(function (sum, v) { return sum + v; }, 0) / temps.length;
+
+      var card = el("div", "history-summary-card");
+      card.appendChild(el("div", "summary-probe-label", "Probe " + probeIdx));
+
+      var addRow = function (label, value) {
+        var row = el("div", "summary-row");
+        row.appendChild(el("span", "summary-label", label));
+        row.appendChild(el("span", "summary-value", value));
+        card.appendChild(row);
+      };
+
+      addRow("Min", minTemp.toFixed(1) + "\u00B0C");
+      addRow("Max", maxTemp.toFixed(1) + "\u00B0C");
+      addRow("Average", avgTemp.toFixed(1) + "\u00B0C");
+      addRow("Readings", String(temps.length));
+
+      if (probeTarget) {
+        var targetLabel = "";
+        if (probeTarget.mode === "range" && probeTarget.range_low != null && probeTarget.range_high != null) {
+          targetLabel = probeTarget.range_low + "\u2013" + probeTarget.range_high + "\u00B0C";
+        } else if (probeTarget.target_value != null) {
+          targetLabel = probeTarget.target_value + "\u00B0C";
+        }
+        if (targetLabel) {
+          addRow("Target", targetLabel);
+        }
+        if (targetReachedTs && firstTs) {
+          var ttSec = Math.floor((new Date(targetReachedTs).getTime() - new Date(firstTs).getTime()) / 1000);
+          var ttH = Math.floor(ttSec / 3600);
+          var ttM = Math.floor((ttSec % 3600) / 60);
+          var ttS = ttSec % 60;
+          var ttParts = [];
+          if (ttH > 0) ttParts.push(ttH + "h");
+          ttParts.push(ttM + "m");
+          if (ttH === 0) ttParts.push(ttS + "s");
+          addRow("Time to target", ttParts.join(" "));
+        } else if (probeTarget && !targetReachedTs) {
+          addRow("Time to target", "Not reached");
+        }
+      }
+
+      historySummaryGrid.appendChild(card);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Settings Tab                                                        */
+  /* ------------------------------------------------------------------ */
+
+  var settingsDeviceList     = document.getElementById("settingsDeviceList");
+  var settingsUptime         = document.getElementById("settingsUptime");
+  var settingsPollInterval   = document.getElementById("settingsPollInterval");
+  var settingsScanInterval   = document.getElementById("settingsScanInterval");
+  var settingsDevicesTotal   = document.getElementById("settingsDevicesTotal");
+  var settingsDevicesConn    = document.getElementById("settingsDevicesConnected");
+
+  /* Populate log level dropdowns */
+  var LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
+  var logLevelRows = document.querySelectorAll(".log-level-row");
+  logLevelRows.forEach(function (row) {
+    var select = row.querySelector("select");
+    LOG_LEVELS.forEach(function (level) {
+      var opt = document.createElement("option");
+      opt.value = level;
+      opt.textContent = level;
+      select.appendChild(opt);
+    });
+    select.value = "INFO"; /* default; will be overridden if we can read actual levels */
+
+    select.addEventListener("change", function () {
+      var loggerName = row.dataset.logger;
+      var newLevel = select.value;
+      updateLogLevel(loggerName, newLevel, select);
+    });
+  });
+
+  function refreshSettingsDevices() {
+    settingsDeviceList.textContent = "";
+    var keys = Object.keys(devices);
+    if (keys.length === 0) {
+      settingsDeviceList.appendChild(el("p", "settings-no-devices", "No devices discovered yet."));
+      return;
+    }
+
+    keys.forEach(function (sensorId) {
+      var dev = devices[sensorId];
+      var data = dev.data || {};
+      var card = el("div", "settings-device-card");
+
+      var name = data.name || sensorId;
+      card.appendChild(el("div", "settings-device-name", name));
+
+      var detailDiv = el("div", "settings-device-detail");
+      if (data.model_name || data.model) {
+        detailDiv.appendChild(el("span", null, "Model: " + (data.model_name || data.model)));
+      }
+      detailDiv.appendChild(el("span", null, "Address: " + sensorId));
+
+      var bleState = deviceBleStates[sensorId] || "unknown";
+      detailDiv.appendChild(el("span", null, "State: " + bleStateLabel(bleState)));
+
+      if (data.last_update) {
+        var lastSeen = new Date(data.last_update);
+        if (!isNaN(lastSeen.getTime())) {
+          detailDiv.appendChild(el("span", null, "Last seen: " + lastSeen.toLocaleString("en-AU", {
+            day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+          })));
+        }
+      }
+
+      card.appendChild(detailDiv);
+      settingsDeviceList.appendChild(card);
+    });
+  }
+
+  function formatUptime(seconds) {
+    if (seconds == null || isNaN(seconds)) return "\u2014";
+    seconds = Math.floor(seconds);
+    var d = Math.floor(seconds / 86400);
+    var h = Math.floor((seconds % 86400) / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    var parts = [];
+    if (d > 0) parts.push(d + "d");
+    if (h > 0) parts.push(h + "h");
+    parts.push(m + "m");
+    if (d === 0) parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  function fetchServerHealth() {
+    fetch("/health")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        settingsUptime.textContent = formatUptime(data.uptime_seconds);
+        settingsPollInterval.textContent = (data.poll_interval || "\u2014") + "s";
+        settingsScanInterval.textContent = (data.scan_interval || "\u2014") + "s";
+        settingsDevicesTotal.textContent = data.devices_total != null ? data.devices_total : "\u2014";
+        settingsDevicesConn.textContent = data.devices_connected != null ? data.devices_connected : "\u2014";
+      })
+      .catch(function (err) {
+        console.warn("[iGrill] Failed to fetch health:", err);
+      });
+  }
+
+  function updateLogLevel(loggerName, level, selectEl) {
+    var body = {};
+    body[loggerName] = level;
+
+    fetch("/api/config/log-levels", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        var result = data.results && data.results[loggerName];
+        if (result === true) {
+          flashSelect(selectEl, "flash-success");
+        } else {
+          flashSelect(selectEl, "flash-error");
+        }
+      })
+      .catch(function (err) {
+        console.warn("[iGrill] Failed to update log level:", err);
+        flashSelect(selectEl, "flash-error");
+      });
+  }
+
+  function flashSelect(selectEl, className) {
+    selectEl.classList.add(className);
+    setTimeout(function () {
+      selectEl.classList.remove(className);
+    }, 1200);
   }
 
   /* ------------------------------------------------------------------ */
