@@ -35,11 +35,27 @@ To update to the latest image:
 docker compose pull && docker compose up -d
 ```
 
-By default the container exposes the port directly. To place the service behind a [Traefik](https://traefik.io/) reverse proxy instead, uncomment the Traefik labels and `proxy` network in `docker-compose.yml`, comment out the `ports` section, and ensure the external network exists:
+By default the container exposes the port directly. To place the service behind a [Traefik](https://traefik.io/) reverse proxy, create a `docker-compose.override.yml` (gitignored) alongside the base compose file:
 
-```sh
-docker network create proxy   # one-time setup
+```yaml
+services:
+  igrill:
+    ports: !reset []
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.igrill.rule=Host(`igrill.${HOSTNAME}`)"
+      - "traefik.http.routers.igrill.entrypoints=web-secure"
+      - "traefik.http.routers.igrill.tls.certresolver=myresolver"
+      - "traefik.http.services.igrill.loadbalancer.server.port=39120"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
 ```
+
+Ensure the external network exists: `docker network create proxy`
 
 ### Local Development
 

@@ -29,24 +29,6 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - igrill-data:/data
     restart: unless-stopped
-    # -- Traefik reverse proxy (optional) ------------------------------------
-    # Uncomment the labels and networks sections below, and comment out the
-    # ports section above, to place this service behind Traefik.  Ensure the
-    # external "proxy" network exists: docker network create proxy
-    #
-    # labels:
-    #   - "traefik.enable=true"
-    #   - "traefik.http.routers.igrill.rule=Host(`igrill.${HOSTNAME}`)"
-    #   - "traefik.http.routers.igrill.entrypoints=web-secure"
-    #   - "traefik.http.routers.igrill.tls.certresolver=myresolver"
-    #   - "traefik.http.services.igrill.loadbalancer.server.port=39120"
-    # networks:
-    #   - proxy
 
 volumes:
   igrill-data:
-
-# Uncomment for Traefik:
-# networks:
-#   proxy:
-#     external: true
