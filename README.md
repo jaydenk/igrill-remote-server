@@ -207,6 +207,7 @@ tests/
   test_metrics.py        # Prometheus metrics registry tests
   test_models.py         # Data models tests
   test_protocol.py       # BLE protocol module tests
+  test_integration.py    # Full-server integration tests
   test_routes.py         # HTTP route handler tests
   test_schema.py         # Database schema tests
 ```
