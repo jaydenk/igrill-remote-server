@@ -23,6 +23,9 @@ service/
     device.py      # DeviceStore — async-safe in-memory device state
     reading.py     # Temperature probe parsing and reading payload builder
     session.py     # TargetConfig dataclass for probe target temperatures
+  db/
+    schema.py      # Normalised database schema definitions and init_db()
+    migrations.py  # Schema migration runner (stub for future use)
   history/
     store.py       # HistoryStore — SQLite-backed sessions, readings, and session targets
   alerts/
@@ -37,6 +40,7 @@ tests/
   test_protocol.py   # BLE protocol module tests
   test_models.py     # Data models tests (device store, readings, session config)
   test_history.py    # HistoryStore tests (sessions, targets)
+  test_schema.py     # Database schema tests (tables, indexes, constraints, idempotency)
   test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
 ```
 
