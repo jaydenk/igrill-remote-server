@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from bleak import BleakClient
 
+from service.ble.connection_state import ConnectionState, ConnectionStateMachine
 from service.ble.protocol import (
     APP_CHALLENGE_UUID,
     BATTERY_LEVEL_UUID,
@@ -36,6 +37,8 @@ from service.history.store import HistoryStore, now_iso, now_iso_utc
 from service.alerts.evaluator import AlertEvaluator
 
 LOG = logging.getLogger("igrill.ble")
+
+_AUTH_MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,8 @@ class DeviceWorker:
         poll_interval: int,
         timeout: int,
         evaluator: AlertEvaluator,
+        connect_timeout: int = 10,
+        max_backoff: float = 60.0,
     ) -> None:
         self.address = address
         self.name = name
@@ -84,13 +89,23 @@ class DeviceWorker:
         self.history = history
         self.poll_interval = poll_interval
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
         self._evaluator = evaluator
         self._model: Optional[ModelInfo] = None
         self._stop = asyncio.Event()
         self._connected_logged = False
         self._seq = 0
+        self._state_machine = ConnectionStateMachine(
+            max_backoff=max_backoff,
+            on_change=self._on_state_change,
+        )
 
     # -- Public interface ---------------------------------------------------
+
+    @property
+    def connection_state(self) -> ConnectionState:
+        """Expose the current connection state for external inspection."""
+        return self._state_machine.state
 
     def update_name(self, name: Optional[str]) -> None:
         if name:
@@ -102,8 +117,9 @@ class DeviceWorker:
     async def run(self) -> None:
         while not self._stop.is_set():
             try:
+                self._state_machine.transition(ConnectionState.CONNECTING)
                 LOG.debug("Connecting to %s (%s)", self.address, self.name or "unknown")
-                async with BleakClient(self.address, timeout=self.timeout) as client:
+                async with BleakClient(self.address, timeout=self.connect_timeout) as client:
                     self._connected_logged = False
                     services = client.services
                     if services is None:
@@ -113,11 +129,19 @@ class DeviceWorker:
                     if services is None:
                         LOG.warning("No services discovered for %s", self.address)
                         await self.store.upsert(self.address, connected=False, error="services_unavailable")
-                        await asyncio.sleep(3)
+                        self._state_machine.transition(ConnectionState.DISCONNECTED)
+                        self._state_machine.transition(ConnectionState.BACKOFF)
+                        await self._publish_state_change_event()
+                        await asyncio.sleep(self._state_machine.backoff_seconds)
                         continue
                     self._model = detect_model(services)
                     await self._update_model_state()
+
+                    self._state_machine.transition(ConnectionState.AUTHENTICATING)
                     await self._authenticate(client, services)
+
+                    self._state_machine.transition(ConnectionState.POLLING)
+                    await self._publish_state_change_event()
 
                     # If a session is active, mark this device as rejoined
                     session_id = await self.history.get_current_session_id()
@@ -132,7 +156,7 @@ class DeviceWorker:
                         await self.history.device_left_session(session_id, self.address)
 
                     await self.history.note_disconnect(self.address, now_iso_utc())
-                    await self.store.upsert(self.address, connected=False)
+                    await self._handle_disconnect()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -153,9 +177,53 @@ class DeviceWorker:
                         LOG.debug("Failed to mark device %s as left on error", self.address)
 
                 await self.history.note_disconnect(self.address, now_iso_utc())
-                await asyncio.sleep(3)
+                await self._handle_disconnect()
 
     # -- Internal helpers ---------------------------------------------------
+
+    def _on_state_change(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
+        """Synchronous callback invoked on every state transition."""
+        LOG.info(
+            "state_change address=%s old=%s new=%s",
+            self.address,
+            old_state.value,
+            new_state.value,
+        )
+
+    async def _publish_state_change_event(self) -> None:
+        """Publish a device_state_change event to the store's event queue."""
+        envelope = _make_envelope(
+            "device_state_change",
+            {
+                "address": self.address,
+                "state": self._state_machine.state.value,
+            },
+        )
+        await self.store.publish_event(envelope)
+
+    async def _handle_disconnect(self) -> None:
+        """Common disconnect handling: zero out readings, transition to
+        DISCONNECTED -> BACKOFF, publish the event, and sleep for backoff."""
+        # Zero out probe readings so stale data is not displayed
+        await self.store.upsert(
+            self.address,
+            connected=False,
+            probes=[],
+            connected_probes=[],
+            probe_status="no_probes_connected",
+        )
+
+        self._state_machine.transition(ConnectionState.DISCONNECTED)
+        self._state_machine.transition(ConnectionState.BACKOFF)
+        await self._publish_state_change_event()
+
+        backoff = self._state_machine.backoff_seconds
+        LOG.info(
+            "Backing off %s for %.1fs before reconnect",
+            self.address,
+            backoff,
+        )
+        await asyncio.sleep(backoff)
 
     async def _update_model_state(self) -> None:
         if self._model:
@@ -183,11 +251,37 @@ class DeviceWorker:
         ):
             LOG.warning("Device %s missing authentication characteristics", self.address)
             return
-        LOG.debug("Sending auth challenge to %s", self.address)
-        await client.write_gatt_char(APP_CHALLENGE_UUID, bytes(16), response=True)
-        challenge = await client.read_gatt_char(DEVICE_CHALLENGE_UUID)
-        LOG.debug("Received device challenge from %s: %s", self.address, challenge.hex())
-        await client.write_gatt_char(DEVICE_RESPONSE_UUID, challenge, response=True)
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, _AUTH_MAX_RETRIES + 1):
+            try:
+                LOG.debug(
+                    "Sending auth challenge to %s (attempt %d/%d)",
+                    self.address,
+                    attempt,
+                    _AUTH_MAX_RETRIES,
+                )
+                await client.write_gatt_char(APP_CHALLENGE_UUID, bytes(16), response=True)
+                challenge = await client.read_gatt_char(DEVICE_CHALLENGE_UUID)
+                LOG.debug("Received device challenge from %s: %s", self.address, challenge.hex())
+                await client.write_gatt_char(DEVICE_RESPONSE_UUID, challenge, response=True)
+                return  # success
+            except Exception as exc:
+                last_exc = exc
+                LOG.warning(
+                    "Auth attempt %d/%d failed for %s: %s",
+                    attempt,
+                    _AUTH_MAX_RETRIES,
+                    self.address,
+                    exc,
+                )
+                if attempt < _AUTH_MAX_RETRIES:
+                    await asyncio.sleep(1)
+
+        # All retries exhausted
+        raise RuntimeError(
+            f"Authentication failed after {_AUTH_MAX_RETRIES} attempts for {self.address}"
+        ) from last_exc
 
     async def _poll_loop(self, client: BleakClient, services) -> None:  # type: ignore[override]
         probe_uuids: List[str] = []

@@ -14,6 +14,7 @@ service/
   main.py          # App factory and entry point (thin ~90-line module)
   ble/
     protocol.py       # BLE protocol constants, model definitions, and detection
+    connection_state.py # ConnectionStateMachine — BLE connection state machine with exponential backoff
     device_worker.py  # DeviceWorker — connects, authenticates, and polls a single iGrill device
     device_manager.py # DeviceManager — scans for iGrill devices and spawns workers
   api/
@@ -44,6 +45,7 @@ tests/
   test_history_store.py # HistoryStore full test suite (new normalised API)
   test_schema.py        # Database schema tests (tables, indexes, constraints, idempotency)
   test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
+  test_connection_state.py # ConnectionStateMachine tests (transitions, backoff, callbacks)
   test_logging.py    # Structured logging setup tests (global level, subsystem overrides, runtime updates)
 ```
 
@@ -74,7 +76,9 @@ To override defaults with a file, copy `env.example` to `.env` and edit values.
 | --- | --- | --- | --- |
 | `IGRILL_PORT` | `39120` | integer (1-65535) | HTTP port for `/metrics`. |
 | `IGRILL_POLL_INTERVAL` | `15` | integer (5-60) | Polling interval in seconds. |
-| `IGRILL_TIMEOUT` | `30` | integer (>=1) | GATT read/connect timeout in seconds. |
+| `IGRILL_TIMEOUT` | `30` | integer (>=1) | GATT characteristic read timeout in seconds. |
+| `IGRILL_CONNECT_TIMEOUT` | `10` | integer (>=1) | BLE connection timeout in seconds (separate from read timeout). |
+| `IGRILL_MAX_BACKOFF` | `60` | integer (>=1) | Maximum exponential backoff delay in seconds between reconnection attempts. |
 | `IGRILL_MAC_PREFIX` | `70:91:8F` | MAC prefix string | Prefix used to filter devices during scans. |
 | `IGRILL_BIND_ADDRESS` | `0.0.0.0` | IP address | Bind address for the HTTP server. |
 | `IGRILL_SCAN_INTERVAL` | `60` | integer (>=1) | Time between BLE scans in seconds. |
@@ -168,8 +172,11 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 - `target_reached` -- probe temperature hit the target.
 - `target_exceeded` -- probe temperature went above the target.
 - `target_reminder` -- periodic nudge while temperature remains above target.
+- `device_state_change` -- broadcast when a device's connection state changes (e.g. connecting, polling, disconnected, backoff).
 
 **Session model:** Sessions are user-initiated only -- no session is auto-created on startup or when a device connects. The device worker always polls BLE and broadcasts live readings to WebSocket clients, but only records to the database and evaluates alert targets when a session is active and the device is part of it. When a device disconnects during a session, it is marked as having left; on reconnect, it is automatically rejoined.
+
+**Connection state machine:** Each device worker manages a state machine that tracks its BLE connection lifecycle: `discovered` -> `connecting` -> `authenticating` -> `polling` -> `disconnected` -> `backoff` -> `connecting` (retry). On disconnect or error, the worker uses exponential backoff (starting at 2s, capped at `IGRILL_MAX_BACKOFF`) before attempting reconnection. A successful connection resets the backoff counter. Authentication is retried up to 3 times before failing. Probe readings are zeroed on disconnect to avoid displaying stale data.
 
 Note: `curl` does not support WebSockets. Use a client like `websocat` or `wscat`, or an iOS `URLSessionWebSocketTask`.
 

@@ -34,6 +34,8 @@ class DeviceManager:
         scan_interval: int,
         scan_timeout: int,
         evaluator: AlertEvaluator,
+        connect_timeout: int = 10,
+        max_backoff: float = 60.0,
     ) -> None:
         self.store = store
         self.history = history
@@ -43,6 +45,8 @@ class DeviceManager:
         self.scan_interval = scan_interval
         self.scan_timeout = scan_timeout
         self._evaluator = evaluator
+        self._connect_timeout = connect_timeout
+        self._max_backoff = max_backoff
         self._workers: Dict[str, DeviceWorker] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
 
@@ -107,6 +111,8 @@ class DeviceManager:
                             self.poll_interval,
                             self.timeout,
                             self._evaluator,
+                            connect_timeout=self._connect_timeout,
+                            max_backoff=self._max_backoff,
                         )
                         self._workers[address] = worker
                         self._tasks[address] = asyncio.create_task(worker.run())

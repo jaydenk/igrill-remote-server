@@ -63,6 +63,8 @@ async def run() -> None:
         scan_interval=config.scan_interval,
         scan_timeout=config.scan_timeout,
         evaluator=app["evaluator"],
+        connect_timeout=config.connect_timeout,
+        max_backoff=config.max_backoff,
     )
 
     tasks = [
