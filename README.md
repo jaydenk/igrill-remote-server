@@ -32,6 +32,7 @@ service/
     static/
       index.html   # Single-page monitoring dashboard (vanilla HTML/CSS/JS)
 tests/
+  conftest.py        # Shared pytest fixtures (tmp_db, etc.)
   test_config.py     # Configuration module tests
   test_protocol.py   # BLE protocol module tests
   test_models.py     # Data models tests (device store, readings, session config)
