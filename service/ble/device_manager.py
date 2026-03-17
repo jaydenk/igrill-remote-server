@@ -122,6 +122,24 @@ class DeviceManager:
                 raise
             except Exception as exc:
                 LOG.warning("Scan error: %s", exc)
+
+            # Check worker health
+            dead_workers = []
+            for address, task in list(self._tasks.items()):
+                if task.done():
+                    exc = task.exception() if not task.cancelled() else None
+                    if exc:
+                        LOG.warning("worker_died address=%s error=%s", address, exc)
+                    else:
+                        LOG.info("worker_stopped address=%s", address)
+                    dead_workers.append(address)
+
+            for address in dead_workers:
+                LOG.info("worker_respawn address=%s", address)
+                worker = self._workers[address]
+                await self.store.upsert(address, connected=False, error="worker_crashed")
+                self._tasks[address] = asyncio.create_task(worker.run())
+
             await asyncio.sleep(self.scan_interval)
 
     async def stop(self) -> None:
