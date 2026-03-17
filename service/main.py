@@ -8,6 +8,7 @@ import time
 from aiohttp import web
 
 from service.config import Config
+from service.logging_setup import setup_logging
 from service.models.device import DeviceStore
 from service.history.store import HistoryStore
 from service.ble.device_manager import DeviceManager
@@ -44,10 +45,7 @@ async def run() -> None:
     """Start the server, BLE scanner, and broadcast loops."""
     config = Config.from_env()
 
-    logging.basicConfig(
-        level=getattr(logging, config.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    setup_logging(config)
 
     app = create_app(config)
     runner = web.AppRunner(app)

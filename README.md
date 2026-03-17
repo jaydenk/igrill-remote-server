@@ -9,6 +9,7 @@ Originally derived from [bendikwa/esphome-igrill](https://github.com/bendikwa/es
 ```
 service/
   config.py        # Centralised configuration from environment variables
+  logging_setup.py # Structured logging setup with per-subsystem level control
   __init__.py      # Package marker
   main.py          # App factory and entry point (thin ~90-line module)
   ble/
@@ -43,6 +44,7 @@ tests/
   test_history_store.py # HistoryStore full test suite (new normalised API)
   test_schema.py        # Database schema tests (tables, indexes, constraints, idempotency)
   test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
+  test_logging.py    # Structured logging setup tests (global level, subsystem overrides, runtime updates)
 ```
 
 ## Quick Start (Docker Compose)
@@ -77,7 +79,12 @@ To override defaults with a file, copy `env.example` to `.env` and edit values.
 | `IGRILL_BIND_ADDRESS` | `0.0.0.0` | IP address | Bind address for the HTTP server. |
 | `IGRILL_SCAN_INTERVAL` | `60` | integer (>=1) | Time between BLE scans in seconds. |
 | `IGRILL_SCAN_TIMEOUT` | `5` | integer (>=1) | Duration of each BLE scan in seconds. |
-| `IGRILL_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Controls log verbosity for the service and BLE layer. |
+| `IGRILL_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Controls global log verbosity for all subsystems. |
+| `IGRILL_LOG_LEVEL_BLE` | (global) | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Override log level for the BLE subsystem (`igrill.ble`). |
+| `IGRILL_LOG_LEVEL_WS` | (global) | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Override log level for the WebSocket subsystem (`igrill.ws`). |
+| `IGRILL_LOG_LEVEL_SESSION` | (global) | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Override log level for the session/history subsystem (`igrill.session`). |
+| `IGRILL_LOG_LEVEL_ALERT` | (global) | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Override log level for the alert subsystem (`igrill.alert`). |
+| `IGRILL_LOG_LEVEL_HTTP` | (global) | `DEBUG`, `INFO`, `WARNING`, `ERROR` | Override log level for the HTTP subsystem (`igrill.http`). |
 | `IGRILL_RECONNECT_GRACE` | `60` | integer (>=0) | Reuse the same session if a reconnect happens within this window. |
 | `IGRILL_DB_PATH` | `/data/igrill.db` | file path | SQLite DB location for persisted history. |
 | `IGRILL_SESSION_TOKEN` | empty | string | If set, require `Authorization: Bearer <token>` on WebSocket to start sessions. |

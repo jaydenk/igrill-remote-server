@@ -21,7 +21,7 @@ from service.history.store import HistoryStore, now_iso_utc
 from service.models.device import DeviceStore
 from service.models.session import TargetConfig
 
-LOG = logging.getLogger("igrill")
+LOG = logging.getLogger("igrill.ws")
 
 
 # ---------------------------------------------------------------------------

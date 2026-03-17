@@ -16,7 +16,7 @@ from service.models.device import DeviceStore
 from service.history.store import HistoryStore, now_iso
 from service.alerts.evaluator import AlertEvaluator
 
-LOG = logging.getLogger("igrill")
+LOG = logging.getLogger("igrill.ble")
 
 
 class DeviceManager:

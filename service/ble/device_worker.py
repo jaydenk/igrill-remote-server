@@ -35,7 +35,7 @@ from service.models.reading import (
 from service.history.store import HistoryStore, now_iso, now_iso_utc
 from service.alerts.evaluator import AlertEvaluator
 
-LOG = logging.getLogger("igrill")
+LOG = logging.getLogger("igrill.ble")
 
 
 # ---------------------------------------------------------------------------

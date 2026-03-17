@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from aiohttp import web
 
 from service.history.store import HistoryStore, now_iso
 from service.models.device import DeviceStore
+
+LOG = logging.getLogger("igrill.http")
 
 
 # ---------------------------------------------------------------------------

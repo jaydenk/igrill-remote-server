@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from service.models.session import TargetConfig
 
-LOG = logging.getLogger("igrill")
+LOG = logging.getLogger("igrill.alert")
 
 
 @dataclass
