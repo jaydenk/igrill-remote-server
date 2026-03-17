@@ -27,7 +27,7 @@ service/
     schema.py      # Normalised database schema definitions and init_db()
     migrations.py  # Schema migration runner (stub for future use)
   history/
-    store.py       # HistoryStore — SQLite-backed sessions, readings, and session targets
+    store.py       # HistoryStore — normalised SQLite-backed sessions, readings, and targets (UUID session IDs, per-probe rows)
   alerts/
     evaluator.py   # AlertEvaluator — checks probes against targets, emits alert events
   web/
@@ -39,8 +39,9 @@ tests/
   test_config.py     # Configuration module tests
   test_protocol.py   # BLE protocol module tests
   test_models.py     # Data models tests (device store, readings, session config)
-  test_history.py    # HistoryStore tests (sessions, targets)
-  test_schema.py     # Database schema tests (tables, indexes, constraints, idempotency)
+  test_history.py       # HistoryStore legacy API tests (sessions, targets)
+  test_history_store.py # HistoryStore full test suite (new normalised API)
+  test_schema.py        # Database schema tests (tables, indexes, constraints, idempotency)
   test_alerts.py     # AlertEvaluator tests (approaching, reached, exceeded, range, clear)
 ```
 

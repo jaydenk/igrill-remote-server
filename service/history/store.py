@@ -1,9 +1,9 @@
 """History store — persists sessions and readings in SQLite.
 
-Extracted from the monolithic ``main.py``.  The only additions over the
-original implementation are the ``session_targets`` table and the three
-target-related async methods (``save_targets``, ``get_targets``,
-``update_targets``).
+Rewritten to use the normalised schema from ``service.db.schema``.
+Session IDs are UUID hex strings, sessions are user-initiated only
+(no auto-session on startup), and probe readings are stored as
+individual rows rather than JSON blobs.
 """
 
 from __future__ import annotations
@@ -12,12 +12,17 @@ import asyncio
 import json
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from service.db.schema import init_db
+from service.models.session import TargetConfig
+
 
 # ---------------------------------------------------------------------------
-# Module-level utility helpers
+# Module-level utility helpers (kept for backward compatibility — other
+# modules import these directly).
 # ---------------------------------------------------------------------------
 
 
@@ -45,301 +50,132 @@ def parse_iso(timestamp: str) -> Optional[datetime]:
 
 
 class HistoryStore:
-    """SQLite-backed store for grill session history and readings."""
+    """SQLite-backed store for grill session history and readings.
+
+    Uses the normalised schema defined in ``service.db.schema``.  Session
+    IDs are 32-character UUID hex strings.  No session is created on
+    construction — call :meth:`start_session` explicitly.
+    """
 
     def __init__(self, db_path: str, reconnect_grace: int) -> None:
         self._db_path = db_path
         self._reconnect_grace = reconnect_grace
         self._lock = asyncio.Lock()
-        self._current_session_id: Optional[int] = None
+        self._current_session_id: Optional[str] = None
         self._current_session_start_ts: Optional[str] = None
-        self._last_session_id: Optional[int] = None
-        self._last_activity_ts: Optional[datetime] = None
+        self._last_session_id: Optional[str] = None
         self._last_disconnect_ts: Optional[datetime] = None
         self._last_disconnect_sensor: Optional[str] = None
-        self._started_from_restart = False
+
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._init_schema()
-        self._load_session_state()
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        init_db(self._conn)
 
-    # -- Schema --------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Session lifecycle (user-initiated only)
+    # ------------------------------------------------------------------
 
-    def _init_schema(self) -> None:
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                address TEXT NOT NULL,
-                name TEXT,
-                model TEXT,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                start_reason TEXT,
-                end_reason TEXT
-            )
-            """
-        )
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS readings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL,
-                address TEXT NOT NULL,
-                recorded_at TEXT NOT NULL,
-                seq INTEGER,
-                session_start_ts TEXT,
-                unit TEXT,
-                battery_percent REAL,
-                propane_percent REAL,
-                pulse_json TEXT,
-                probes_json TEXT,
-                data_json TEXT,
-                FOREIGN KEY(session_id) REFERENCES sessions(id)
-            )
-            """
-        )
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS session_targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL,
-                probe_index INTEGER NOT NULL,
-                mode TEXT NOT NULL,
-                target_value REAL,
-                range_low REAL,
-                range_high REAL,
-                pre_alert_offset REAL DEFAULT 10.0,
-                reminder_interval_secs INTEGER DEFAULT 300,
-                FOREIGN KEY(session_id) REFERENCES sessions(id)
-            )
-            """
-        )
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_address ON sessions(address)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_readings_session ON readings(session_id)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_session ON session_targets(session_id)")
-        self._ensure_column("readings", "seq", "seq INTEGER")
-        self._ensure_column("readings", "data_json", "data_json TEXT")
-        self._ensure_column("readings", "session_start_ts", "session_start_ts TEXT")
-        self._ensure_column("sessions", "start_reason", "start_reason TEXT")
-        self._ensure_column("sessions", "end_reason", "end_reason TEXT")
-        self._conn.commit()
+    async def start_session(
+        self, addresses: list[str], reason: str
+    ) -> dict:
+        """Create a new session.
 
-    def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        columns = {
-            row["name"]
-            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        if column not in columns:
-            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+        If a session is already active, ends it first.  Creates
+        ``session_devices`` entries for each address and ensures each
+        address is present in the ``devices`` table.
 
-    # -- Session state -------------------------------------------------------
-
-    def _load_session_state(self) -> None:
-        now_ts = now_iso_utc()
-        row = self._conn.execute(
-            "SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
-        if row:
-            self._last_session_id = row["id"]
-            if row["ended_at"] is None:
-                self._conn.execute(
-                    "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
-                    (now_ts, "server_restart", row["id"]),
-                )
-                self._conn.commit()
-                self._last_session_id = row["id"]
-        has_history = self._conn.execute("SELECT 1 FROM readings LIMIT 1").fetchone()
-        self._started_from_restart = has_history is not None
-        session_id = self._conn.execute(
-            "INSERT INTO sessions (address, started_at, start_reason) VALUES (?, ?, ?)",
-            ("global", now_ts, "server_restart"),
-        )
-        self._conn.commit()
-        session_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        self._current_session_id = int(session_id)
-        self._current_session_start_ts = now_ts
-
-    async def _create_session(self, start_ts: str, reason: str) -> int:
-        self._conn.execute(
-            "INSERT INTO sessions (address, started_at, start_reason) VALUES (?, ?, ?)",
-            ("global", start_ts, reason),
-        )
-        session_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        self._conn.commit()
-        self._current_session_id = int(session_id)
-        self._current_session_start_ts = start_ts
-        self._last_activity_ts = None
-        return int(session_id)
-
-    async def _end_session(self, end_ts: str, reason: str) -> Optional[int]:
-        if self._current_session_id is None:
-            return None
-        session_id = self._current_session_id
-        self._conn.execute(
-            "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
-            (end_ts, reason, session_id),
-        )
-        self._conn.commit()
-        self._last_session_id = session_id
-        self._current_session_id = None
-        self._current_session_start_ts = None
-        return session_id
-
-    async def ensure_session_for_reading(
-        self,
-        now_ts: str,
-        sensor_id: Optional[str],
-    ) -> Dict[str, object]:
-        now_dt = parse_iso(now_ts) or datetime.now(timezone.utc)
-        async with self._lock:
-            rolled = False
-            end_event = None
-            start_event = None
-            reason_start = "sensor_reconnect"
-            if self._current_session_id is None:
-                if self._started_from_restart:
-                    reason_start = "server_restart"
-                session_id = await self._create_session(now_ts, reason_start)
-                start_event = {
-                    "sensorId": sensor_id,
-                    "sessionId": session_id,
-                    "sessionStartTs": now_ts,
-                    "reason": reason_start,
-                }
-            elif self._last_activity_ts and (now_dt - self._last_activity_ts).total_seconds() > self._reconnect_grace:
-                rolled = True
-                duration_seconds = None
-                if self._current_session_start_ts:
-                    start_dt = parse_iso(self._current_session_start_ts)
-                    if start_dt:
-                        duration_seconds = int((now_dt - start_dt).total_seconds())
-                end_reason = "idle_timeout"
-                if self._last_disconnect_ts:
-                    if (now_dt - self._last_disconnect_ts).total_seconds() >= self._reconnect_grace:
-                        end_reason = "sensor_disconnect"
-                end_session_id = await self._end_session(now_ts, end_reason)
-                end_event = {
-                    "sensorId": sensor_id,
-                    "sessionId": end_session_id,
-                    "sessionEndTs": now_ts,
-                    "reason": end_reason,
-                }
-                if duration_seconds is not None:
-                    end_event["durationSeconds"] = duration_seconds
-                session_id = await self._create_session(now_ts, "sensor_reconnect")
-                start_event = {
-                    "sensorId": sensor_id,
-                    "sessionId": session_id,
-                    "sessionStartTs": now_ts,
-                    "reason": "sensor_reconnect",
-                }
-            elif self._last_activity_ts is None and self._current_session_start_ts:
-                start_dt = parse_iso(self._current_session_start_ts)
-                if start_dt and (now_dt - start_dt).total_seconds() > self._reconnect_grace:
-                    rolled = True
-                    end_reason = "idle_timeout"
-                    if self._last_disconnect_ts:
-                        if (now_dt - self._last_disconnect_ts).total_seconds() >= self._reconnect_grace:
-                            end_reason = "sensor_disconnect"
-                    end_event = {
-                        "sensorId": sensor_id,
-                        "sessionId": self._current_session_id,
-                        "sessionEndTs": now_ts,
-                        "reason": end_reason,
-                        "durationSeconds": int((now_dt - start_dt).total_seconds()),
-                    }
-                    await self._end_session(now_ts, end_reason)
-                    session_id = await self._create_session(now_ts, "sensor_reconnect")
-                    start_event = {
-                        "sensorId": sensor_id,
-                        "sessionId": session_id,
-                        "sessionStartTs": now_ts,
-                        "reason": "sensor_reconnect",
-                    }
-                else:
-                    session_id = self._current_session_id
-            else:
-                session_id = self._current_session_id
-            self._last_activity_ts = now_dt
-            if session_id is None:
-                session_id = await self._create_session(now_ts, reason_start)
-                start_event = {
-                    "sensorId": sensor_id,
-                    "sessionId": session_id,
-                    "sessionStartTs": now_ts,
-                    "reason": reason_start,
-                }
-            return {
-                "session_id": session_id,
-                "session_start_ts": self._current_session_start_ts,
-                "rolled": rolled,
-                "end_event": end_event,
-                "start_event": start_event,
-            }
-
-    async def force_new_session(self, now_ts: str, sensor_id: Optional[str], reason: str) -> Dict[str, object]:
+        Returns a dict with ``session_id``, ``session_start_ts``,
+        ``start_event``, and ``end_event`` (the latter from ending the
+        previous session, or ``None``).
+        """
         async with self._lock:
             end_event = None
             if self._current_session_id is not None:
-                duration_seconds = None
-                if self._current_session_start_ts:
-                    start_dt = parse_iso(self._current_session_start_ts)
-                    end_dt = parse_iso(now_ts)
-                    if start_dt and end_dt:
-                        duration_seconds = int((end_dt - start_dt).total_seconds())
-                end_session_id = await self._end_session(now_ts, reason)
-                end_event = {
-                    "sensorId": sensor_id,
-                    "sessionId": end_session_id,
-                    "sessionEndTs": now_ts,
-                    "reason": reason,
-                }
-                if duration_seconds is not None:
-                    end_event["durationSeconds"] = duration_seconds
-            session_id = await self._create_session(now_ts, reason)
+                end_event = self._end_session_locked(reason)
+
+            now_ts = now_iso_utc()
+            session_id = uuid.uuid4().hex
+
+            self._conn.execute(
+                "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+                (session_id, now_ts, reason),
+            )
+
+            for addr in addresses:
+                self._register_device_locked(addr, name=None, model=None)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO session_devices (session_id, address, joined_at) "
+                    "VALUES (?, ?, ?)",
+                    (session_id, addr, now_ts),
+                )
+
+            self._conn.commit()
+
+            self._current_session_id = session_id
+            self._current_session_start_ts = now_ts
+
             start_event = {
-                "sensorId": sensor_id,
                 "sessionId": session_id,
                 "sessionStartTs": now_ts,
                 "reason": reason,
             }
+
             return {
                 "session_id": session_id,
-                "session_start_ts": self._current_session_start_ts,
-                "end_event": end_event,
+                "session_start_ts": now_ts,
                 "start_event": start_event,
+                "end_event": end_event,
             }
 
-    async def end_current_session(self, now_ts: str, reason: str) -> Optional[Dict[str, object]]:
+    async def end_session(self, reason: str) -> Optional[dict]:
         """End the current session without starting a new one.
 
-        Returns a dict with session details if a session was active, else *None*.
+        Returns a dict with session details if a session was active,
+        else ``None``.
         """
         async with self._lock:
-            if self._current_session_id is None:
-                return None
-            session_id = self._current_session_id
-            duration_seconds = None
-            if self._current_session_start_ts:
-                start_dt = parse_iso(self._current_session_start_ts)
-                end_dt = parse_iso(now_ts)
-                if start_dt and end_dt:
-                    duration_seconds = int((end_dt - start_dt).total_seconds())
-            await self._end_session(now_ts, reason)
-            result: Dict[str, object] = {
-                "sessionId": session_id,
-                "sessionEndTs": now_ts,
-                "reason": reason,
-            }
-            if duration_seconds is not None:
-                result["durationSeconds"] = duration_seconds
-            return result
+            return self._end_session_locked(reason)
 
-    async def get_session_state(self) -> Dict[str, object]:
+    def _end_session_locked(self, reason: str) -> Optional[dict]:
+        """End the current session (must be called while holding ``_lock``)."""
+        if self._current_session_id is None:
+            return None
+
+        now_ts = now_iso_utc()
+        session_id = self._current_session_id
+
+        duration_seconds = None
+        if self._current_session_start_ts:
+            start_dt = parse_iso(self._current_session_start_ts)
+            end_dt = parse_iso(now_ts)
+            if start_dt and end_dt:
+                duration_seconds = int((end_dt - start_dt).total_seconds())
+
+        self._conn.execute(
+            "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+            (now_ts, reason, session_id),
+        )
+        self._conn.commit()
+
+        self._last_session_id = session_id
+        self._current_session_id = None
+        self._current_session_start_ts = None
+
+        result: dict = {
+            "sessionId": session_id,
+            "sessionEndTs": now_ts,
+            "reason": reason,
+        }
+        if duration_seconds is not None:
+            result["durationSeconds"] = duration_seconds
+        return result
+
+    async def get_session_state(self) -> dict:
+        """Return the current session state."""
         async with self._lock:
             return {
                 "current_session_id": self._current_session_id,
@@ -348,207 +184,362 @@ class HistoryStore:
                 "session_timeout_seconds": self._reconnect_grace,
             }
 
-    async def note_disconnect(self, sensor_id: Optional[str], ts: str) -> None:
+    async def is_session_active(self) -> bool:
+        """Quick check whether a session is currently active."""
         async with self._lock:
-            self._last_disconnect_ts = parse_iso(ts)
-            self._last_disconnect_sensor = sensor_id
+            return self._current_session_id is not None
 
-    # -- Readings ------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Multi-device management within sessions
+    # ------------------------------------------------------------------
+
+    async def device_left_session(self, session_id: str, address: str) -> None:
+        """Mark a device as having left the session."""
+        async with self._lock:
+            now_ts = now_iso_utc()
+            self._conn.execute(
+                "UPDATE session_devices SET left_at = ? "
+                "WHERE session_id = ? AND address = ?",
+                (now_ts, session_id, address),
+            )
+            self._conn.commit()
+
+    async def device_rejoined_session(self, session_id: str, address: str) -> None:
+        """Clear the ``left_at`` timestamp so the device is active again."""
+        async with self._lock:
+            self._conn.execute(
+                "UPDATE session_devices SET left_at = NULL "
+                "WHERE session_id = ? AND address = ?",
+                (session_id, address),
+            )
+            self._conn.commit()
+
+    async def add_device_to_session(self, session_id: str, address: str) -> None:
+        """Add a new device to an active session."""
+        async with self._lock:
+            now_ts = now_iso_utc()
+            self._register_device_locked(address, name=None, model=None)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO session_devices (session_id, address, joined_at) "
+                "VALUES (?, ?, ?)",
+                (session_id, address, now_ts),
+            )
+            self._conn.commit()
+
+    async def get_session_devices(self, session_id: str) -> list[dict]:
+        """Return devices in a session."""
+        async with self._lock:
+            rows = self._conn.execute(
+                "SELECT sd.session_id, sd.address, sd.joined_at, sd.left_at, "
+                "d.name, d.model "
+                "FROM session_devices sd "
+                "LEFT JOIN devices d ON sd.address = d.address "
+                "WHERE sd.session_id = ?",
+                (session_id,),
+            ).fetchall()
+            return [
+                {
+                    "session_id": row["session_id"],
+                    "address": row["address"],
+                    "joined_at": row["joined_at"],
+                    "left_at": row["left_at"],
+                    "name": row["name"],
+                    "model": row["model"],
+                }
+                for row in rows
+            ]
+
+    async def all_devices_left(self, session_id: str) -> bool:
+        """Return True if all devices in the session have ``left_at`` set."""
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) as total, "
+                "COUNT(left_at) as left_count "
+                "FROM session_devices WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row["total"] == 0:
+                return True
+            return row["left_count"] == row["total"]
+
+    # ------------------------------------------------------------------
+    # Device registry
+    # ------------------------------------------------------------------
+
+    async def register_device(
+        self, address: str, name: Optional[str], model: Optional[str]
+    ) -> None:
+        """Upsert a device into the ``devices`` table."""
+        async with self._lock:
+            self._register_device_locked(address, name, model)
+            self._conn.commit()
+
+    def _register_device_locked(
+        self, address: str, name: Optional[str], model: Optional[str]
+    ) -> None:
+        """Insert or update device (must hold ``_lock``)."""
+        now_ts = now_iso_utc()
+        existing = self._conn.execute(
+            "SELECT address FROM devices WHERE address = ?", (address,)
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO devices (address, name, model, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (address, name, model, now_ts, now_ts),
+            )
+        else:
+            parts = ["last_seen = ?"]
+            params: list = [now_ts]
+            if name is not None:
+                parts.append("name = ?")
+                params.append(name)
+            if model is not None:
+                parts.append("model = ?")
+                params.append(model)
+            params.append(address)
+            self._conn.execute(
+                f"UPDATE devices SET {', '.join(parts)} WHERE address = ?",
+                params,
+            )
+
+    async def list_devices(self) -> list[dict]:
+        """Return all known devices."""
+        async with self._lock:
+            rows = self._conn.execute(
+                "SELECT address, name, model, first_seen, last_seen FROM devices"
+            ).fetchall()
+            return [
+                {
+                    "address": row["address"],
+                    "name": row["name"],
+                    "model": row["model"],
+                    "first_seen": row["first_seen"],
+                    "last_seen": row["last_seen"],
+                }
+                for row in rows
+            ]
+
+    # ------------------------------------------------------------------
+    # Reading storage (normalised)
+    # ------------------------------------------------------------------
 
     async def record_reading(
         self,
-        session_id: int,
+        session_id: str,
         address: str,
-        payload: Dict[str, object],
-        reading_data: Dict[str, object],
         seq: int,
-        session_start_ts: Optional[str],
+        probes: list[dict],
+        battery: Optional[int],
+        propane: Optional[float],
+        heating: Optional[dict],
+        recorded_at: Optional[str] = None,
     ) -> None:
+        """Record a reading cycle from a device.
+
+        Inserts one row per probe into ``probe_readings`` and one summary
+        row into ``device_readings``.
+        """
         async with self._lock:
+            ts = recorded_at if recorded_at is not None else now_iso_utc()
+            heating_json = json.dumps(heating) if heating is not None else None
+
             self._conn.execute(
-                """
-                INSERT INTO readings (
-                    session_id,
-                    address,
-                    recorded_at,
-                    seq,
-                    session_start_ts,
-                    unit,
-                    battery_percent,
-                    propane_percent,
-                    pulse_json,
-                    probes_json,
-                    data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    address,
-                    payload.get("last_update"),
-                    seq,
-                    session_start_ts,
-                    payload.get("unit"),
-                    payload.get("battery_percent"),
-                    payload.get("propane_percent"),
-                    json.dumps(payload.get("pulse", {})),
-                    json.dumps(payload.get("probes", [])),
-                    json.dumps(reading_data),
-                ),
+                "INSERT OR REPLACE INTO device_readings "
+                "(session_id, address, recorded_at, seq, battery, propane, heating_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, address, ts, seq, battery, propane, heating_json),
             )
+
+            for probe in probes:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO probe_readings "
+                    "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        address,
+                        ts,
+                        seq,
+                        probe["index"],
+                        probe.get("temperature"),
+                    ),
+                )
+
             self._conn.commit()
 
-    async def get_history(self, address: Optional[str] = None) -> List[Dict[str, object]]:
+    async def get_session_readings(self, session_id: str) -> list[dict]:
+        """Return all probe readings for a session, ordered by recorded_at."""
         async with self._lock:
-            if address:
-                session_rows = self._conn.execute(
-                    "SELECT * FROM sessions WHERE address = ? ORDER BY started_at ASC",
-                    (address,),
-                ).fetchall()
-            else:
-                session_rows = self._conn.execute(
-                    "SELECT * FROM sessions ORDER BY started_at ASC"
-                ).fetchall()
-            sessions = []
-            for session in session_rows:
-                readings = self._conn.execute(
-                    "SELECT * FROM readings WHERE session_id = ? ORDER BY recorded_at ASC",
-                    (session["id"],),
-                ).fetchall()
-                sessions.append(
-                    {
-                        "session_id": session["id"],
-                        "address": session["address"],
-                        "name": session["name"],
-                        "model": session["model"],
-                        "started_at": session["started_at"],
-                        "ended_at": session["ended_at"],
-                        "readings": [
-                            {
-                                "recorded_at": reading["recorded_at"],
-                                "unit": reading["unit"],
-                                "battery_percent": reading["battery_percent"],
-                                "propane_percent": reading["propane_percent"],
-                                "pulse": json.loads(reading["pulse_json"] or "{}"),
-                                "probes": json.loads(reading["probes_json"] or "[]"),
-                            }
-                            for reading in readings
-                        ],
-                    }
-                )
-            return sessions
-
-    async def has_history(self) -> bool:
-        async with self._lock:
-            row = self._conn.execute("SELECT 1 FROM readings LIMIT 1").fetchone()
-            return row is not None
-
-    async def latest_ts(self) -> Optional[str]:
-        async with self._lock:
-            row = self._conn.execute(
-                "SELECT recorded_at FROM readings ORDER BY recorded_at DESC LIMIT 1"
-            ).fetchone()
-            if row:
-                return row["recorded_at"]
-            return None
+            rows = self._conn.execute(
+                "SELECT pr.session_id, pr.address, pr.recorded_at, pr.seq, "
+                "pr.probe_index, pr.temperature, "
+                "dr.battery, dr.propane, dr.heating_json "
+                "FROM probe_readings pr "
+                "LEFT JOIN device_readings dr "
+                "ON pr.session_id = dr.session_id "
+                "AND pr.address = dr.address "
+                "AND pr.seq = dr.seq "
+                "WHERE pr.session_id = ? "
+                "ORDER BY pr.recorded_at ASC, pr.probe_index ASC",
+                (session_id,),
+            ).fetchall()
+            return [
+                {
+                    "session_id": row["session_id"],
+                    "address": row["address"],
+                    "recorded_at": row["recorded_at"],
+                    "seq": row["seq"],
+                    "probe_index": row["probe_index"],
+                    "temperature": row["temperature"],
+                    "battery": row["battery"],
+                    "propane": row["propane"],
+                    "heating": json.loads(row["heating_json"])
+                    if row["heating_json"]
+                    else None,
+                }
+                for row in rows
+            ]
 
     async def get_history_items(
         self,
-        since_ts: Optional[str],
-        until_ts: Optional[str],
-        limit: Optional[int],
-        session_id: Optional[int],
-    ) -> List[Dict[str, object]]:
-        query = "SELECT * FROM readings WHERE 1=1"
-        params: List[object] = []
-        if session_id is not None:
-            query += " AND session_id = ?"
-            params.append(session_id)
-        else:
-            if since_ts:
-                query += " AND recorded_at >= ?"
-                params.append(since_ts)
-            if until_ts:
-                query += " AND recorded_at <= ?"
-                params.append(until_ts)
-        query += " ORDER BY recorded_at ASC"
-        if limit:
-            query += " LIMIT ?"
-            params.append(limit)
-        async with self._lock:
-            rows = self._conn.execute(query, params).fetchall()
-        items = []
-        for row in rows:
-            data_json = row["data_json"]
-            if data_json:
-                data = json.loads(data_json)
-            else:
-                data = {
-                    "sensorId": row["address"],
-                    "data": {
-                        "unit": row["unit"],
-                        "battery_percent": row["battery_percent"],
-                        "propane_percent": row["propane_percent"],
-                        "pulse": json.loads(row["pulse_json"] or "{}"),
-                        "probes": json.loads(row["probes_json"] or "[]"),
-                    },
-                }
-            items.append(
-                {
-                    "ts": row["recorded_at"],
-                    "seq": row["seq"],
-                    "sessionId": row["session_id"],
-                    "sessionStartTs": row["session_start_ts"],
-                    "payload": data,
-                    "data": data,
-                }
-            )
-        return items
+        since_ts: Optional[str] = None,
+        until_ts: Optional[str] = None,
+        limit: Optional[int] = None,
+        session_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Query readings with optional filters.
 
-    async def list_sessions(self, limit: int) -> List[Dict[str, object]]:
+        Returns probe-level rows joined with device-level data.
+        """
+        async with self._lock:
+            query = (
+                "SELECT pr.session_id, pr.address, pr.recorded_at, pr.seq, "
+                "pr.probe_index, pr.temperature, "
+                "dr.battery, dr.propane, dr.heating_json "
+                "FROM probe_readings pr "
+                "LEFT JOIN device_readings dr "
+                "ON pr.session_id = dr.session_id "
+                "AND pr.address = dr.address "
+                "AND pr.seq = dr.seq "
+                "WHERE 1=1"
+            )
+            params: list = []
+
+            if session_id is not None:
+                query += " AND pr.session_id = ?"
+                params.append(session_id)
+            else:
+                if since_ts:
+                    query += " AND pr.recorded_at >= ?"
+                    params.append(since_ts)
+                if until_ts:
+                    query += " AND pr.recorded_at <= ?"
+                    params.append(until_ts)
+
+            query += " ORDER BY pr.recorded_at ASC, pr.probe_index ASC"
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            rows = self._conn.execute(query, params).fetchall()
+            return [
+                {
+                    "session_id": row["session_id"],
+                    "address": row["address"],
+                    "recorded_at": row["recorded_at"],
+                    "seq": row["seq"],
+                    "probe_index": row["probe_index"],
+                    "temperature": row["temperature"],
+                    "battery": row["battery"],
+                    "propane": row["propane"],
+                    "heating": json.loads(row["heating_json"])
+                    if row["heating_json"]
+                    else None,
+                }
+                for row in rows
+            ]
+
+    # ------------------------------------------------------------------
+    # Session listing
+    # ------------------------------------------------------------------
+
+    async def list_sessions(self, limit: int, offset: int = 0) -> list[dict]:
+        """Return recent sessions with reading counts and device info."""
         async with self._lock:
             rows = self._conn.execute(
-                "SELECT id, started_at, ended_at FROM sessions ORDER BY started_at DESC LIMIT ?",
-                (limit,),
+                "SELECT s.id, s.started_at, s.ended_at, s.start_reason, s.end_reason, "
+                "COUNT(DISTINCT pr.id) as reading_count "
+                "FROM sessions s "
+                "LEFT JOIN probe_readings pr ON s.id = pr.session_id "
+                "GROUP BY s.id "
+                "ORDER BY s.started_at DESC "
+                "LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
-            session_ids = [row["id"] for row in rows]
-            counts = {}
-            if session_ids:
-                placeholders = ",".join("?" for _ in session_ids)
-                count_rows = self._conn.execute(
-                    f"SELECT session_id, COUNT(*) as count FROM readings WHERE session_id IN ({placeholders}) GROUP BY session_id",
-                    session_ids,
+
+            results = []
+            for row in rows:
+                session_id = row["id"]
+                devices = self._conn.execute(
+                    "SELECT sd.address, d.name, d.model "
+                    "FROM session_devices sd "
+                    "LEFT JOIN devices d ON sd.address = d.address "
+                    "WHERE sd.session_id = ?",
+                    (session_id,),
                 ).fetchall()
-                counts = {row["session_id"]: row["count"] for row in count_rows}
-        return [
-            {
-                "sessionId": row["id"],
-                "startTs": row["started_at"],
-                "endTs": row["ended_at"],
-                "count": counts.get(row["id"], 0),
-            }
-            for row in rows
-        ]
+                results.append(
+                    {
+                        "sessionId": session_id,
+                        "startTs": row["started_at"],
+                        "endTs": row["ended_at"],
+                        "startReason": row["start_reason"],
+                        "endReason": row["end_reason"],
+                        "readingCount": row["reading_count"],
+                        "devices": [
+                            {
+                                "address": d["address"],
+                                "name": d["name"],
+                                "model": d["model"],
+                            }
+                            for d in devices
+                        ],
+                    }
+                )
+            return results
 
-    # -- Session targets (new) -----------------------------------------------
+    # ------------------------------------------------------------------
+    # Targets
+    # ------------------------------------------------------------------
 
-    async def save_targets(self, session_id: int, targets: list) -> None:
-        """Save target configs for a session. *targets* is a list of TargetConfig."""
+    async def save_targets(
+        self, session_id: str, address: str, targets: list[TargetConfig]
+    ) -> None:
+        """Persist target configs for a session and device."""
         async with self._lock:
             for t in targets:
                 self._conn.execute(
-                    """INSERT INTO session_targets
-                       (session_id, probe_index, mode, target_value, range_low,
-                        range_high, pre_alert_offset, reminder_interval_secs)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (session_id, t.probe_index, t.mode, t.target_value,
-                     t.range_low, t.range_high, t.pre_alert_offset,
-                     t.reminder_interval_secs),
+                    "INSERT OR REPLACE INTO session_targets "
+                    "(session_id, address, probe_index, mode, target_value, "
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        address,
+                        t.probe_index,
+                        t.mode,
+                        t.target_value,
+                        t.range_low,
+                        t.range_high,
+                        t.pre_alert_offset,
+                        t.reminder_interval_secs,
+                    ),
                 )
             self._conn.commit()
 
-    async def get_targets(self, session_id: int) -> list:
-        """Get target configs for a session. Returns list of TargetConfig."""
-        from service.models.session import TargetConfig
+    async def get_targets(self, session_id: str) -> list[TargetConfig]:
+        """Retrieve all target configs for a session."""
         async with self._lock:
             rows = self._conn.execute(
                 "SELECT probe_index, mode, target_value, range_low, range_high, "
@@ -558,28 +549,52 @@ class HistoryStore:
             ).fetchall()
         return [
             TargetConfig(
-                probe_index=r[0], mode=r[1], target_value=r[2],
-                range_low=r[3], range_high=r[4],
-                pre_alert_offset=r[5] or 10.0,
-                reminder_interval_secs=r[6] or 300,
+                probe_index=r["probe_index"],
+                mode=r["mode"],
+                target_value=r["target_value"],
+                range_low=r["range_low"],
+                range_high=r["range_high"],
+                pre_alert_offset=r["pre_alert_offset"] if r["pre_alert_offset"] is not None else 5.0,
+                reminder_interval_secs=r["reminder_interval_secs"] if r["reminder_interval_secs"] is not None else 0,
             )
             for r in rows
         ]
 
-    async def update_targets(self, session_id: int, targets: list) -> None:
-        """Replace all targets for a session."""
+    async def update_targets(
+        self, session_id: str, address: str, targets: list[TargetConfig]
+    ) -> None:
+        """Replace all targets for a session and device."""
         async with self._lock:
             self._conn.execute(
-                "DELETE FROM session_targets WHERE session_id = ?", (session_id,)
+                "DELETE FROM session_targets WHERE session_id = ? AND address = ?",
+                (session_id, address),
             )
             for t in targets:
                 self._conn.execute(
-                    """INSERT INTO session_targets
-                       (session_id, probe_index, mode, target_value, range_low,
-                        range_high, pre_alert_offset, reminder_interval_secs)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (session_id, t.probe_index, t.mode, t.target_value,
-                     t.range_low, t.range_high, t.pre_alert_offset,
-                     t.reminder_interval_secs),
+                    "INSERT INTO session_targets "
+                    "(session_id, address, probe_index, mode, target_value, "
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        address,
+                        t.probe_index,
+                        t.mode,
+                        t.target_value,
+                        t.range_low,
+                        t.range_high,
+                        t.pre_alert_offset,
+                        t.reminder_interval_secs,
+                    ),
                 )
             self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Disconnect tracking
+    # ------------------------------------------------------------------
+
+    async def note_disconnect(self, sensor_id: str, ts: str) -> None:
+        """Record a disconnect timestamp for grace period tracking."""
+        async with self._lock:
+            self._last_disconnect_ts = parse_iso(ts)
+            self._last_disconnect_sensor = sensor_id

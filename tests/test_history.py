@@ -1,13 +1,19 @@
-"""Tests for the HistoryStore (sessions, readings, session targets)."""
+"""Tests for the HistoryStore (sessions, readings, session targets).
+
+Updated to match the rewritten HistoryStore API which uses UUID session
+IDs, user-initiated sessions, and normalised schema with per-device
+address on targets.
+"""
 
 import asyncio
 import os
-import tempfile
 
 import pytest
 
 from service.history.store import HistoryStore
 from service.models.session import TargetConfig
+
+_TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
 
 
 def _run(coro):
@@ -26,38 +32,58 @@ def _make_store(tmp_path: str, reconnect_grace: int = 300) -> HistoryStore:
 # -----------------------------------------------------------------------
 
 
-class TestSessionCreatedOnInit:
-    def test_session_created_on_init(self, tmp_path):
-        """Constructing a HistoryStore should create an initial session."""
+class TestNoSessionOnInit:
+    def test_no_session_on_init(self, tmp_path):
+        """Constructing a HistoryStore should NOT create an initial session."""
         async def _test():
             store = _make_store(str(tmp_path))
             state = await store.get_session_state()
-            assert state["current_session_id"] is not None
-            assert isinstance(state["current_session_id"], int)
-            assert state["current_session_start_ts"] is not None
+            assert state["current_session_id"] is None
+            assert state["current_session_start_ts"] is None
 
         _run(_test())
 
 
-class TestForceNewSession:
-    def test_force_new_session(self, tmp_path):
-        """Forcing a new session should produce a different session ID."""
+class TestStartSession:
+    def test_start_session(self, tmp_path):
+        """Starting a session should produce a valid UUID session ID."""
         async def _test():
             store = _make_store(str(tmp_path))
-            state_before = await store.get_session_state()
-            old_id = state_before["current_session_id"]
-
-            result = await store.force_new_session(
-                "2026-01-01T00:00:00+00:00", "AA:BB:CC:DD:EE:FF", "manual"
+            result = await store.start_session(
+                addresses=[_TEST_ADDRESS], reason="manual"
             )
             new_id = result["session_id"]
 
-            assert new_id != old_id
+            assert new_id is not None
+            assert isinstance(new_id, str)
+            assert len(new_id) == 32  # UUID hex
             assert result["start_event"] is not None
             assert result["start_event"]["reason"] == "manual"
 
             state_after = await store.get_session_state()
             assert state_after["current_session_id"] == new_id
+
+        _run(_test())
+
+
+class TestStartSessionEndsPrevious:
+    def test_start_session_ends_previous(self, tmp_path):
+        """Starting a new session should auto-end the previous one."""
+        async def _test():
+            store = _make_store(str(tmp_path))
+            r1 = await store.start_session(
+                addresses=[_TEST_ADDRESS], reason="manual"
+            )
+            old_id = r1["session_id"]
+
+            r2 = await store.start_session(
+                addresses=[_TEST_ADDRESS], reason="manual"
+            )
+            new_id = r2["session_id"]
+
+            assert new_id != old_id
+            assert r2["end_event"] is not None
+            assert r2["end_event"]["sessionId"] == old_id
 
         _run(_test())
 
@@ -72,8 +98,10 @@ class TestSaveAndGetTargets:
         """Saved targets should be retrievable with matching field values."""
         async def _test():
             store = _make_store(str(tmp_path))
-            state = await store.get_session_state()
-            session_id = state["current_session_id"]
+            result = await store.start_session(
+                addresses=[_TEST_ADDRESS], reason="user"
+            )
+            session_id = result["session_id"]
 
             targets = [
                 TargetConfig(probe_index=0, mode="fixed", target_value=74.0),
@@ -86,7 +114,7 @@ class TestSaveAndGetTargets:
                     reminder_interval_secs=120,
                 ),
             ]
-            await store.save_targets(session_id, targets)
+            await store.save_targets(session_id, _TEST_ADDRESS, targets)
 
             loaded = await store.get_targets(session_id)
             assert len(loaded) == 2
@@ -112,15 +140,17 @@ class TestUpdateTargets:
         """Updating targets should replace all existing targets for the session."""
         async def _test():
             store = _make_store(str(tmp_path))
-            state = await store.get_session_state()
-            session_id = state["current_session_id"]
+            result = await store.start_session(
+                addresses=[_TEST_ADDRESS], reason="user"
+            )
+            session_id = result["session_id"]
 
             # Save initial targets
             initial_targets = [
                 TargetConfig(probe_index=0, mode="fixed", target_value=74.0),
                 TargetConfig(probe_index=1, mode="fixed", target_value=80.0),
             ]
-            await store.save_targets(session_id, initial_targets)
+            await store.save_targets(session_id, _TEST_ADDRESS, initial_targets)
 
             # Update with different targets
             updated_targets = [
@@ -133,7 +163,7 @@ class TestUpdateTargets:
                     reminder_interval_secs=60,
                 ),
             ]
-            await store.update_targets(session_id, updated_targets)
+            await store.update_targets(session_id, _TEST_ADDRESS, updated_targets)
 
             loaded = await store.get_targets(session_id)
             assert len(loaded) == 1
