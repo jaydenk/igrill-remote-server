@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>iGrill Remote</title>
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css">
+  <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
   <style>
     :root {
       --bg-primary: #1a1a2e;
@@ -415,6 +417,50 @@
       font-size: 0.9rem;
     }
 
+    /* -- Charts --------------------------------------------------------- */
+
+    .charts-section {
+      display: none;
+    }
+
+    .charts-section.visible {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .chart-container {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      overflow: hidden;
+    }
+
+    .chart-container .chart-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .chart-container .chart-wrapper {
+      width: 100%;
+      min-height: 0;
+    }
+
+    .chart-container .chart-wrapper .uplot {
+      width: 100% !important;
+    }
+
+    .per-probe-charts {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
     /* -- Placeholder Tabs ----------------------------------------------- */
 
     .placeholder {
@@ -635,6 +681,16 @@
       </div>
     </div>
   </section>
+
+  <!-- Charts (visible when session active) -->
+  <section class="charts-section" id="chartsSection">
+    <div class="section-title">Temperature Charts</div>
+    <div class="chart-container" id="combinedChartContainer">
+      <div class="chart-title">All Probes</div>
+      <div class="chart-wrapper" id="combinedChartWrapper"></div>
+    </div>
+    <div class="per-probe-charts" id="perProbeCharts"></div>
+  </section>
 </div>
 
 <!-- ================================================================== -->
@@ -697,6 +753,15 @@
   };
   var durationTimer = null;
 
+  /* Chart state */
+  var PROBE_COLOURS = ["#4fc3f7", "#81c784", "#ffb74d", "#ba68c8"];
+  var CHART_WINDOW_SECONDS = 30 * 60; /* 30 minutes */
+  var chartData = [];       /* array of { ts: epoch_seconds, probes: { 1: temp, 2: temp, ... } } */
+  var activeProbeIndices = new Set();
+  var combinedChart = null;
+  var perProbeCharts = {};   /* keyed by probe index */
+  var uplotAvailable = typeof window.uPlot === "function";
+
   /* DOM refs */
   var statusDot       = document.getElementById("statusDot");
   var statusText      = document.getElementById("statusText");
@@ -706,6 +771,9 @@
   var sessionDevCount = document.getElementById("sessionDeviceCount");
   var deviceCards     = document.getElementById("deviceCards");
   var emptyState      = document.getElementById("emptyState");
+  var chartsSection   = document.getElementById("chartsSection");
+  var combinedChartWrapper = document.getElementById("combinedChartWrapper");
+  var perProbeChartsEl = document.getElementById("perProbeCharts");
 
   /* Modal refs */
   var sessionModal    = document.getElementById("sessionModal");
@@ -936,6 +1004,425 @@
     }
     return null;
   }
+
+  /* ------------------------------------------------------------------ */
+  /* Charts                                                              */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Reusable chart creation function.
+   * @param {HTMLElement} container
+   * @param {Object} options - { probes: [{index, label, color}], width, height, targets: [{probeIndex, mode, value, low, high}] }
+   * @returns {{ addReading, setTargets, destroy, resize }}
+   */
+  function createTemperatureChart(container, options) {
+    if (!uplotAvailable) {
+      return { addReading: function(){}, setTargets: function(){}, destroy: function(){}, resize: function(){} };
+    }
+
+    var probes = options.probes || [];
+    var targets = options.targets || [];
+    var chartWidth = options.width || container.clientWidth || 400;
+    var chartHeight = options.height || 250;
+
+    /* Data arrays: index 0 = timestamps, 1..N = probe series */
+    var timestamps = [];
+    var seriesData = [];
+    for (var i = 0; i < probes.length; i++) {
+      seriesData.push([]);
+    }
+
+    /* Build CSS variable values */
+    var computedStyle = getComputedStyle(document.documentElement);
+    var bgCard = computedStyle.getPropertyValue("--bg-card").trim() || "#0f3460";
+    var textSecondary = computedStyle.getPropertyValue("--text-secondary").trim() || "#a0a0b8";
+    var borderColor = computedStyle.getPropertyValue("--border").trim() || "#2a2a4a";
+
+    /* Build uPlot series config */
+    var seriesConfig = [{ label: "Time" }];
+    for (var j = 0; j < probes.length; j++) {
+      seriesConfig.push({
+        label: probes[j].label,
+        stroke: probes[j].color,
+        width: 2,
+        paths: uPlot.paths.linear(),
+        points: { show: false }
+      });
+    }
+
+    /* Target line drawing plugin */
+    var targetLines = targets.slice();
+
+    function drawTargetLines(u) {
+      var ctx = u.ctx;
+      ctx.save();
+      var yScale = u.scales.y;
+      var plotLeft = u.bbox.left / devicePixelRatio;
+      var plotTop = u.bbox.top / devicePixelRatio;
+      var plotWidth = u.bbox.width / devicePixelRatio;
+      var plotHeight = u.bbox.height / devicePixelRatio;
+
+      for (var t = 0; t < targetLines.length; t++) {
+        var tgt = targetLines[t];
+        /* Find colour for this probe index */
+        var tgtColor = "#888";
+        for (var p = 0; p < probes.length; p++) {
+          if (probes[p].index === tgt.probeIndex) {
+            tgtColor = probes[p].color;
+            break;
+          }
+        }
+
+        ctx.strokeStyle = tgtColor;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.globalAlpha = 0.7;
+
+        var drawLine = function(val) {
+          if (val == null) return;
+          var yPos = u.valToPos(val, "y", true);
+          /* Only draw if within plot area */
+          if (yPos >= plotTop && yPos <= plotTop + plotHeight) {
+            ctx.beginPath();
+            ctx.moveTo(plotLeft, yPos);
+            ctx.lineTo(plotLeft + plotWidth, yPos);
+            ctx.stroke();
+          }
+        };
+
+        if (tgt.mode === "range") {
+          drawLine(tgt.low);
+          drawLine(tgt.high);
+        } else {
+          drawLine(tgt.value);
+        }
+      }
+      ctx.restore();
+    }
+
+    var targetPlugin = {
+      hooks: {
+        draw: [drawTargetLines]
+      }
+    };
+
+    /* Build uPlot options */
+    var opts = {
+      width: chartWidth,
+      height: chartHeight,
+      plugins: [targetPlugin],
+      cursor: {
+        drag: { x: false, y: false }
+      },
+      scales: {
+        x: { time: true },
+        y: { auto: true }
+      },
+      axes: [
+        {
+          stroke: textSecondary,
+          grid: { stroke: borderColor, width: 1 },
+          ticks: { stroke: borderColor, width: 1 },
+          font: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          labelFont: "11px -apple-system, BlinkMacSystemFont, sans-serif"
+        },
+        {
+          stroke: textSecondary,
+          grid: { stroke: borderColor, width: 1 },
+          ticks: { stroke: borderColor, width: 1 },
+          font: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          labelFont: "11px -apple-system, BlinkMacSystemFont, sans-serif",
+          label: "\u00B0C",
+          size: 50
+        }
+      ],
+      series: seriesConfig
+    };
+
+    var plotData = [timestamps].concat(seriesData);
+    var plot = new uPlot(opts, plotData, container);
+
+    return {
+      addReading: function(timestamp, probeTemps) {
+        /* timestamp: epoch seconds (number), probeTemps: { probeIndex: temp } */
+        timestamps.push(timestamp);
+        for (var s = 0; s < probes.length; s++) {
+          var temp = probeTemps[probes[s].index];
+          seriesData[s].push(temp != null ? temp : null);
+        }
+
+        /* Auto-scroll: trim data older than CHART_WINDOW_SECONDS from the latest */
+        var latest = timestamps[timestamps.length - 1];
+        var cutoff = latest - CHART_WINDOW_SECONDS;
+        while (timestamps.length > 1 && timestamps[0] < cutoff) {
+          timestamps.shift();
+          for (var r = 0; r < seriesData.length; r++) {
+            seriesData[r].shift();
+          }
+        }
+
+        var newData = [timestamps].concat(seriesData);
+        plot.setData(newData);
+      },
+      setTargets: function(newTargets) {
+        targetLines = newTargets.slice();
+        plot.redraw();
+      },
+      destroy: function() {
+        plot.destroy();
+      },
+      resize: function(w, h) {
+        plot.setSize({ width: w, height: h || chartHeight });
+      }
+    };
+  }
+
+  /** Build target objects array from session.targets for chart use. */
+  function buildChartTargets() {
+    if (!session.targets || session.targets.length === 0) return [];
+    var result = [];
+    for (var i = 0; i < session.targets.length; i++) {
+      var t = session.targets[i];
+      result.push({
+        probeIndex: t.probe_index,
+        mode: t.mode || "fixed",
+        value: t.target_value != null ? t.target_value : null,
+        low: t.range_low != null ? t.range_low : null,
+        high: t.range_high != null ? t.range_high : null
+      });
+    }
+    return result;
+  }
+
+  /** Determine active probe configs from activeProbeIndices. */
+  function buildProbeConfigs() {
+    var sorted = Array.from(activeProbeIndices).sort(function(a,b){ return a - b; });
+    var configs = [];
+    for (var i = 0; i < sorted.length; i++) {
+      var idx = sorted[i];
+      configs.push({
+        index: idx,
+        label: "Probe " + idx,
+        color: PROBE_COLOURS[(idx - 1) % PROBE_COLOURS.length]
+      });
+    }
+    return configs;
+  }
+
+  /** Destroy all current charts. */
+  function destroyAllCharts() {
+    if (combinedChart) {
+      combinedChart.destroy();
+      combinedChart = null;
+    }
+    var keys = Object.keys(perProbeCharts);
+    for (var i = 0; i < keys.length; i++) {
+      perProbeCharts[keys[i]].destroy();
+    }
+    perProbeCharts = {};
+    /* Clear DOM containers */
+    combinedChartWrapper.textContent = "";
+    perProbeChartsEl.textContent = "";
+  }
+
+  /** Rebuild all charts from chartData. */
+  function rebuildCharts() {
+    if (!uplotAvailable) return;
+
+    destroyAllCharts();
+
+    var probeConfigs = buildProbeConfigs();
+    if (probeConfigs.length === 0) return;
+
+    var targets = buildChartTargets();
+    var containerWidth = combinedChartWrapper.clientWidth || 400;
+
+    /* Combined chart */
+    combinedChart = createTemperatureChart(combinedChartWrapper, {
+      probes: probeConfigs,
+      width: containerWidth,
+      height: 280,
+      targets: targets
+    });
+
+    /* Per-probe charts */
+    for (var p = 0; p < probeConfigs.length; p++) {
+      var pc = probeConfigs[p];
+      var wrapper = document.createElement("div");
+      wrapper.className = "chart-container";
+      wrapper.dataset.probeIndex = pc.index;
+
+      var title = el("div", "chart-title", pc.label);
+      wrapper.appendChild(title);
+
+      var chartW = document.createElement("div");
+      chartW.className = "chart-wrapper";
+      wrapper.appendChild(chartW);
+
+      perProbeChartsEl.appendChild(wrapper);
+
+      /* Filter targets for this probe */
+      var probeTargets = [];
+      for (var t = 0; t < targets.length; t++) {
+        if (targets[t].probeIndex === pc.index) {
+          probeTargets.push(targets[t]);
+        }
+      }
+
+      perProbeCharts[pc.index] = createTemperatureChart(chartW, {
+        probes: [pc],
+        width: chartW.clientWidth || containerWidth,
+        height: 220,
+        targets: probeTargets
+      });
+    }
+
+    /* Replay existing data into charts */
+    for (var d = 0; d < chartData.length; d++) {
+      var reading = chartData[d];
+      combinedChart.addReading(reading.ts, reading.probes);
+      var pKeys = Object.keys(perProbeCharts);
+      for (var k = 0; k < pKeys.length; k++) {
+        var pIdx = parseInt(pKeys[k], 10);
+        var singleProbe = {};
+        singleProbe[pIdx] = reading.probes[pIdx] != null ? reading.probes[pIdx] : null;
+        perProbeCharts[pIdx].addReading(reading.ts, singleProbe);
+      }
+    }
+  }
+
+  /** Append a reading to chart data and push into live charts. */
+  function appendChartReading(timestampSeconds, probeTemps) {
+    chartData.push({ ts: timestampSeconds, probes: probeTemps });
+
+    /* Track which probes are active */
+    var needsRebuild = false;
+    var probeKeys = Object.keys(probeTemps);
+    for (var i = 0; i < probeKeys.length; i++) {
+      var idx = parseInt(probeKeys[i], 10);
+      if (!activeProbeIndices.has(idx)) {
+        activeProbeIndices.add(idx);
+        needsRebuild = true;
+      }
+    }
+
+    if (needsRebuild) {
+      rebuildCharts();
+      return; /* rebuild replays all data */
+    }
+
+    if (combinedChart) {
+      combinedChart.addReading(timestampSeconds, probeTemps);
+    }
+    var pKeys = Object.keys(perProbeCharts);
+    for (var k = 0; k < pKeys.length; k++) {
+      var pIdx = parseInt(pKeys[k], 10);
+      var single = {};
+      single[pIdx] = probeTemps[pIdx] != null ? probeTemps[pIdx] : null;
+      perProbeCharts[pIdx].addReading(timestampSeconds, single);
+    }
+  }
+
+  /** Clear chart data and destroy charts. */
+  function clearChartData() {
+    chartData = [];
+    activeProbeIndices = new Set();
+    destroyAllCharts();
+  }
+
+  /** Show or hide the charts section. */
+  function setChartsVisible(visible) {
+    if (visible) {
+      chartsSection.classList.add("visible");
+    } else {
+      chartsSection.classList.remove("visible");
+    }
+  }
+
+  /** Extract probe temperatures from a reading payload's data.probes array. */
+  function extractProbeTemps(dataProbes) {
+    var temps = {};
+    if (!dataProbes || !dataProbes.length) return temps;
+    for (var i = 0; i < dataProbes.length; i++) {
+      var p = dataProbes[i];
+      if (!p.unplugged && p.temperature != null) {
+        temps[p.index] = p.temperature;
+      }
+    }
+    return temps;
+  }
+
+  /** Fetch existing session readings and populate charts. */
+  function fetchSessionReadings(sessionId) {
+    if (!sessionId) return;
+    fetch("/api/sessions/" + encodeURIComponent(sessionId))
+      .then(function(resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function(data) {
+        var readings = data.readings || [];
+        if (readings.length === 0) return;
+
+        /* Group readings by (recorded_at, address) to combine probes */
+        var grouped = {};
+        for (var i = 0; i < readings.length; i++) {
+          var r = readings[i];
+          var key = r.recorded_at + "|" + r.address;
+          if (!grouped[key]) {
+            grouped[key] = { ts: r.recorded_at, probes: {} };
+          }
+          if (r.temperature != null) {
+            grouped[key].probes[r.probe_index] = r.temperature;
+          }
+        }
+
+        /* Sort by timestamp and append */
+        var entries = Object.values(grouped);
+        entries.sort(function(a, b) {
+          return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
+        });
+
+        for (var j = 0; j < entries.length; j++) {
+          var entry = entries[j];
+          var epochSec = new Date(entry.ts).getTime() / 1000;
+          if (isNaN(epochSec)) continue;
+          /* Track probes */
+          var pKeys = Object.keys(entry.probes);
+          for (var k = 0; k < pKeys.length; k++) {
+            activeProbeIndices.add(parseInt(pKeys[k], 10));
+          }
+          chartData.push({ ts: epochSec, probes: entry.probes });
+        }
+
+        /* Now build and populate charts */
+        setChartsVisible(true);
+        rebuildCharts();
+      })
+      .catch(function(err) {
+        console.warn("[iGrill] Failed to fetch session readings:", err);
+      });
+  }
+
+  /** Handle window resize for chart responsiveness. */
+  var resizeTimer = null;
+  window.addEventListener("resize", function() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      if (!uplotAvailable) return;
+      var w = combinedChartWrapper.clientWidth;
+      if (w <= 0) return;
+      if (combinedChart) {
+        combinedChart.resize(w, 280);
+      }
+      var pKeys = Object.keys(perProbeCharts);
+      for (var k = 0; k < pKeys.length; k++) {
+        var chartEl = perProbeChartsEl.querySelector("[data-probe-index='" + pKeys[k] + "'] .chart-wrapper");
+        var cw = chartEl ? chartEl.clientWidth : w;
+        perProbeCharts[pKeys[k]].resize(cw, 220);
+      }
+    }, 200);
+  });
 
   /* ------------------------------------------------------------------ */
   /* Duration Timer                                                      */
@@ -1291,11 +1778,18 @@
   }
 
   function handleStatus(payload) {
+    var previousSessionId = session.id;
     session.id = payload.currentSessionId || null;
     session.startTs = payload.currentSessionStartTs || null;
     session.targets = payload.activeTargets || [];
     session.devices = payload.sessionDevices || [];
     renderSessionBanner();
+
+    /* If we loaded mid-session, fetch existing readings for charts */
+    if (session.id != null && session.id !== previousSessionId && chartData.length === 0) {
+      setChartsVisible(true);
+      fetchSessionReadings(session.id);
+    }
   }
 
   function handleReading(payload) {
@@ -1321,6 +1815,20 @@
 
     renderDevices();
     renderSessionBanner();
+
+    /* Append to charts if session is active */
+    if (session.id != null && payload.data) {
+      var probeTemps = extractProbeTemps(payload.data.probes);
+      if (Object.keys(probeTemps).length > 0) {
+        var ts = payload.data.last_update
+          ? new Date(payload.data.last_update).getTime() / 1000
+          : Date.now() / 1000;
+        if (!isNaN(ts)) {
+          appendChartReading(ts, probeTemps);
+          setChartsVisible(true);
+        }
+      }
+    }
   }
 
   function handleSessionStart(payload) {
@@ -1329,6 +1837,8 @@
     session.targets = payload.targets || session.targets;
     session.devices = payload.devices || session.devices;
     probeAlertStates = {};
+    clearChartData();
+    setChartsVisible(true);
     renderSessionBanner();
     renderDevices();
   }
@@ -1340,6 +1850,8 @@
       session.targets = payload.targets || [];
       session.devices = payload.devices || [];
       probeAlertStates = {};
+      clearChartData();
+      setChartsVisible(true);
       renderSessionBanner();
       renderDevices();
     }
@@ -1351,6 +1863,7 @@
     session.targets = [];
     session.devices = [];
     probeAlertStates = {};
+    /* Keep charts visible with final data — don't destroy until new session or tab switch */
     renderSessionBanner();
     renderDevices();
   }

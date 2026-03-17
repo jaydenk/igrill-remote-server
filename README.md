@@ -80,7 +80,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls, and BLE state indicators. |
+| `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls, BLE state indicators, and live temperature charts (uPlot). |
 | `GET` | `/health` | Health check with uptime, device counts, and active session ID. |
 | `GET` | `/metrics` | Prometheus text exposition format metrics (counters, gauges, labelled). |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
@@ -193,7 +193,7 @@ service/
   web/
     dashboard.py         # Dashboard route handler and static file serving
     static/
-      index.html         # Tab-based monitoring dashboard with live view, session controls, and BLE state (vanilla HTML/CSS/JS)
+      index.html         # Tab-based monitoring dashboard with live view, session controls, BLE state, and real-time temperature charts via uPlot (vanilla HTML/CSS/JS)
 tests/
   conftest.py            # Shared pytest fixtures
   test_alerts.py         # AlertEvaluator tests
