@@ -21,10 +21,18 @@ A standalone BLE polling service for Weber iGrill thermometer devices. It contin
 
 ### Docker Compose (recommended)
 
+The image is built automatically by CI and published to the GitHub Container Registry.
+
 ```sh
 cp env.example .env            # edit values as needed
-docker compose up -d --build
+docker compose up -d
 curl http://localhost:39120/health
+```
+
+To update to the latest image:
+
+```sh
+docker compose pull && docker compose up -d
 ```
 
 By default the container exposes the port directly. To place the service behind a [Traefik](https://traefik.io/) reverse proxy instead, uncomment the Traefik labels and `proxy` network in `docker-compose.yml`, comment out the `ports` section, and ensure the external network exists:
@@ -36,7 +44,7 @@ docker network create proxy   # one-time setup
 ### Local Development
 
 ```sh
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m service.main
 ```
 

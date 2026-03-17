@@ -1,6 +1,6 @@
 services:
   igrill:
-    build: .
+    image: ghcr.io/jaydenk/igrill-remote-server:latest
     container_name: igrill-service
     environment:
       - IGRILL_PORT=${IGRILL_PORT:-39120}
