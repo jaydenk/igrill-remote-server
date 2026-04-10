@@ -27,6 +27,7 @@ class TargetConfig:
     range_high: Optional[float] = None
     pre_alert_offset: float = 10.0
     reminder_interval_secs: int = 300
+    label: Optional[str] = None
 
     def effective_target(self) -> Optional[float]:
         """Return the primary target temperature.
@@ -68,6 +69,10 @@ class TargetConfig:
         if reminder_interval_secs < 0:
             raise ValueError(f"reminder_interval_secs must be >= 0, got {reminder_interval_secs}")
 
+        label = data.get("label")
+        if label is not None:
+            label = str(label)
+
         return cls(
             probe_index=probe_index,
             mode=mode,
@@ -76,6 +81,7 @@ class TargetConfig:
             range_high=_opt_float(data.get("range_high")),
             pre_alert_offset=pre_alert_offset,
             reminder_interval_secs=reminder_interval_secs,
+            label=label,
         )
 
     def to_dict(self) -> dict:
@@ -88,6 +94,7 @@ class TargetConfig:
             "range_high": self.range_high,
             "pre_alert_offset": self.pre_alert_offset,
             "reminder_interval_secs": self.reminder_interval_secs,
+            "label": self.label,
         }
 
 

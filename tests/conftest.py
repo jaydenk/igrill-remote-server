@@ -19,3 +19,9 @@ async def store(tmp_db):
     await s.connect()
     yield s
     await s.close()
+
+
+@pytest.fixture
+def sample_address():
+    """Return a consistent test device address."""
+    return "70:91:8F:00:00:01"

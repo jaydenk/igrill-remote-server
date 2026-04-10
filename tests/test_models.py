@@ -211,6 +211,7 @@ class TestTargetConfig:
             "range_high",
             "pre_alert_offset",
             "reminder_interval_secs",
+            "label",
         }
         assert set(d.keys()) == expected_keys
 
@@ -218,6 +219,18 @@ class TestTargetConfig:
         tc = TargetConfig(probe_index=1, mode="unknown")
         assert tc.effective_target() is None
         assert tc.effective_low() is None
+
+    def test_label_field(self):
+        data = {"probe_index": 1, "mode": "fixed", "target_value": 93.0, "label": "Brisket Point"}
+        tc = TargetConfig.from_dict(data)
+        assert tc.label == "Brisket Point"
+        d = tc.to_dict()
+        assert d["label"] == "Brisket Point"
+
+    def test_label_defaults_none(self):
+        data = {"probe_index": 1, "mode": "fixed", "target_value": 93.0}
+        tc = TargetConfig.from_dict(data)
+        assert tc.label is None
 
 
 # -----------------------------------------------------------------------
