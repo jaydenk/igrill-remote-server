@@ -480,14 +480,31 @@ class DeviceWorker:
                     self.address,
                 )
                 return None
-            # BlueZ/bleak surfaces "Not connected" when a read is attempted
-            # after the link drops mid-poll. That's the normal disconnect
-            # path, not a real error — log at DEBUG so it doesn't mask
-            # actual failures. The disconnect_event is already set, so the
-            # poll loop will exit on the next iteration anyway.
+            # If the BLE link dropped mid-read, the disconnect callback
+            # has already set the event by the time we catch the exception.
+            # Treat every error in that window as a benign disconnect
+            # symptom rather than a real read failure — they come in many
+            # flavours ("Not connected", empty-message BleakDBusError,
+            # "org.bluez.Error.Failed", etc.) and we don't want to spam
+            # a WARNING for each one. The poll loop will exit on the
+            # next iteration via the client.is_connected check.
+            if (
+                self._disconnect_event is not None
+                and self._disconnect_event.is_set()
+            ):
+                LOG.debug(
+                    "Read %s from %s aborted by disconnect: %s",
+                    uuid,
+                    self.address,
+                    exc_text or type(exc).__name__,
+                )
+                return None
+            # BlueZ/bleak surfaces "Not connected" even when our own
+            # disconnect event hasn't fired yet (e.g. BlueZ lost the
+            # link before bleak registered it). Still demote to DEBUG.
             if "Not connected" in exc_text or "org.bluez.Error.NotConnected" in exc_text:
                 LOG.debug(
-                    "Read %s from %s skipped during disconnect",
+                    "Read %s from %s skipped — bluez reports not connected",
                     uuid,
                     self.address,
                 )
