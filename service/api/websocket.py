@@ -639,9 +639,23 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
     try:
         async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
+            # Accept both TEXT and BINARY frames. JSON over WebSocket is
+            # conventionally TEXT, but some clients (including earlier
+            # versions of the iOS app) send BINARY — previously those
+            # frames fell through this loop silently, producing the
+            # confusing symptom of "session_start never reaches the
+            # server". Decoding both types avoids that trap.
+            if msg.type in (web.WSMsgType.TEXT, web.WSMsgType.BINARY):
+                raw = msg.data
+                if isinstance(raw, (bytes, bytearray)):
+                    try:
+                        raw = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        LOG.warning("Non-UTF8 binary frame from %s", peer)
+                        await send_error(ws, "invalid_encoding", "Binary frame must be UTF-8 JSON.")
+                        continue
                 try:
-                    data = json.loads(msg.data)
+                    data = json.loads(raw)
                 except json.JSONDecodeError:
                     LOG.warning("Invalid JSON from %s", peer)
                     await send_error(ws, "invalid_json", "Message must be valid JSON.")
