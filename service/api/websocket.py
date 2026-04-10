@@ -29,6 +29,7 @@ _SESSION_CONTROL_TYPES = frozenset({
     "session_start_request",
     "session_end_request",
     "session_add_device_request",
+    "session_update_request",
     "target_update_request",
 })
 
@@ -305,6 +306,8 @@ async def _handle_status(ctx: _MessageContext) -> None:
         "activeTargets": active_targets,
         "sessionDevices": session_devices,
     }
+    if current_sid is not None:
+        status_payload["currentSessionName"] = await ctx.history.get_session_name(current_sid)
     LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
              ctx.peer, device_state, has_data, session_state.get("current_session_id"))
     await send_envelope(ctx.ws, "status", status_payload, request_id=ctx.request_id)
@@ -447,8 +450,9 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         )
         return
 
+    name = ctx.payload.get("name")
     session_info = await ctx.history.start_session(
-        addresses=device_addresses, reason="user"
+        addresses=device_addresses, reason="user", name=name
     )
 
     if session_info.get("end_event"):
@@ -473,6 +477,7 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         "ok": True,
         "sessionId": new_session_id,
         "sessionStartTs": session_info["session_start_ts"],
+        "name": name,
         "devices": device_addresses,
         "targets": [t.to_dict() for t in targets],
     }
@@ -619,6 +624,33 @@ async def _handle_session_add_device(ctx: _MessageContext) -> None:
     )
 
 
+async def _handle_session_update(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(ctx.ws, "unauthorized", "Not allowed to update sessions", request_id=ctx.request_id)
+        return
+
+    session_id = ctx.payload.get("sessionId")
+    if session_id is None:
+        session_state = await ctx.history.get_session_state()
+        session_id = session_state.get("current_session_id")
+    if session_id is None:
+        await send_error(ctx.ws, "no_session", "No sessionId provided and no active session.", request_id=ctx.request_id)
+        return
+
+    name = ctx.payload.get("name")
+    notes = ctx.payload.get("notes")
+
+    result = await ctx.history.update_session(session_id, name=name, notes=notes)
+    if result is None:
+        await send_error(ctx.ws, "session_not_found", f"Session {session_id} does not exist.", request_id=ctx.request_id)
+        return
+
+    await send_envelope(ctx.ws, "session_update_ack", {
+        "ok": True, "sessionId": session_id,
+        "name": result["name"], "notes": result["notes"],
+    }, request_id=ctx.request_id)
+
+
 # Map message types to their handler functions.  Each handler receives a
 # _MessageContext and uses ``return`` instead of ``continue`` to abort.
 _MESSAGE_HANDLERS: dict[str, Any] = {
@@ -627,6 +659,7 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "history_request": _handle_history,
     "session_start_request": _handle_session_start,
     "session_end_request": _handle_session_end,
+    "session_update_request": _handle_session_update,
     "target_update_request": _handle_target_update,
     "session_add_device_request": _handle_session_add_device,
 }

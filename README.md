@@ -101,7 +101,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls, BLE state indicators, live temperature charts (uPlot), past session browsing with full-timeline charts and summary statistics, and runtime log level management. |
 | `GET` | `/health` | Health check with uptime, device counts, active session ID, poll interval, and scan interval. |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
-| `GET` | `/api/sessions/{id}` | Session detail with devices, targets, and readings. Returns 404 if the session does not exist. |
+| `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
 | `PUT` | `/api/config/log-levels` | Runtime log level update (requires authorisation). |
 
 ### WebSocket Protocol (v2)
@@ -119,8 +119,9 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | `status_request` | Returns device state, session info, sample rate, active targets, and session devices. |
 | `sessions_request` | Lists recent sessions (`payload.limit` defaults to 20, max 100). |
 | `history_request` | Streams history chunks (`sinceTs`, `untilTs`, `limit` (max 10,000), `sessionId`, `chunkSize`). |
-| `session_start_request` | Starts a new user-initiated session. Accepts optional `targets` array and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
+| `session_start_request` | Starts a new user-initiated session. Accepts optional `name` (string), `targets` array, and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
 | `session_end_request` | Ends the current session. Requires authorisation. |
+| `session_update_request` | Updates `name` and/or `notes` on a session. Optional `sessionId` field; defaults to the active session. Requires authorisation. |
 | `session_add_device_request` | Adds a device to the active session mid-cook. Requires `deviceAddress` in payload. Requires authorisation. |
 | `target_update_request` | Updates targets for the current session. Accepts optional `deviceAddress` to scope targets to a specific device. Requires authorisation. |
 
@@ -128,11 +129,12 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 
 | Type | Description |
 | --- | --- |
-| `status` | Response to `status_request` with device state, session info, sample rate, active targets, and session devices. |
+| `status` | Response to `status_request` with device state, session info (including `currentSessionName` when a session is active), sample rate, active targets, and session devices. |
 | `sessions_list` | Response to `sessions_request` with recent session summaries. |
 | `history_chunk` / `history_end` | Streamed response to `history_request`. |
-| `session_start_ack` | Acknowledgement for `session_start_request`. |
+| `session_start_ack` | Acknowledgement for `session_start_request`. Includes `sessionId`, `sessionStartTs`, `name`, `devices`, and `targets`. |
 | `session_end_ack` | Acknowledgement for `session_end_request`. |
+| `session_update_ack` | Acknowledgement for `session_update_request`. Includes updated `name` and `notes`. |
 | `target_update_ack` | Acknowledgement for `target_update_request`. |
 | `session_add_device_ack` | Acknowledgement for `session_add_device_request`. |
 
