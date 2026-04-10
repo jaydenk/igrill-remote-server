@@ -128,7 +128,7 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     async def start_session(
-        self, addresses: list[str], reason: str
+        self, addresses: list[str], reason: str, name: Optional[str] = None
     ) -> dict:
         """Create a new session.
 
@@ -149,8 +149,8 @@ class HistoryStore:
             session_id = uuid.uuid4().hex
 
             await self._conn.execute(
-                "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
-                (session_id, now_ts, reason),
+                "INSERT INTO sessions (id, started_at, start_reason, name) VALUES (?, ?, ?, ?)",
+                (session_id, now_ts, reason, name),
             )
 
             for addr in addresses:
@@ -170,6 +170,7 @@ class HistoryStore:
                 "sessionId": session_id,
                 "sessionStartTs": now_ts,
                 "reason": reason,
+                "name": name,
             }
 
             return {
@@ -248,6 +249,65 @@ class HistoryStore:
         """Quick check whether a session is currently active."""
         async with self._lock:
             return self._current_session_id is not None
+
+    async def update_session(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Update name and/or notes on an existing session.
+
+        Only provided (non-``None``) fields are changed.  Returns the
+        updated ``{"name": ..., "notes": ...}`` dict, or ``None`` if the
+        session does not exist.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT id FROM sessions WHERE id = ?", (session_id,)
+            )
+            if await cursor.fetchone() is None:
+                return None
+
+            updates, params = [], []
+            if name is not None:
+                updates.append("name = ?")
+                params.append(name)
+            if notes is not None:
+                updates.append("notes = ?")
+                params.append(notes)
+
+            if updates:
+                params.append(session_id)
+                await self._conn.execute(
+                    f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
+                    params,
+                )
+                await self._conn.commit()
+
+            cursor = await self._conn.execute(
+                "SELECT name, notes FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = await cursor.fetchone()
+            return {"name": row["name"], "notes": row["notes"]}
+
+    async def get_session_name(self, session_id: str) -> Optional[str]:
+        """Return the name of a session, or ``None`` if not found."""
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT name FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = await cursor.fetchone()
+            return row["name"] if row else None
+
+    async def get_session_notes(self, session_id: str) -> Optional[str]:
+        """Return the notes of a session, or ``None`` if not found."""
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT notes FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = await cursor.fetchone()
+            return row["notes"] if row else None
 
     # ------------------------------------------------------------------
     # Multi-device management within sessions
@@ -544,6 +604,7 @@ class HistoryStore:
             # Step 1: fetch sessions with reading counts
             cursor = await self._conn.execute(
                 "SELECT s.id, s.started_at, s.ended_at, s.start_reason, s.end_reason, "
+                "s.name, s.notes, "
                 "(SELECT COUNT(*) FROM probe_readings pr WHERE pr.session_id = s.id) AS reading_count "
                 "FROM sessions s "
                 "ORDER BY s.started_at DESC "
@@ -586,6 +647,8 @@ class HistoryStore:
                         "endTs": row["ended_at"],
                         "startReason": row["start_reason"],
                         "endReason": row["end_reason"],
+                        "name": row["name"],
+                        "notes": row["notes"],
                         "readingCount": row["reading_count"],
                         "devices": devices_by_session.get(row["id"], []),
                     }
@@ -605,8 +668,8 @@ class HistoryStore:
                 await self._conn.execute(
                     "INSERT OR REPLACE INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
-                    "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         address,
@@ -617,6 +680,7 @@ class HistoryStore:
                         t.range_high,
                         t.pre_alert_offset,
                         t.reminder_interval_secs,
+                        t.label,
                     ),
                 )
             await self._conn.commit()
@@ -626,7 +690,7 @@ class HistoryStore:
         async with self._lock:
             cursor = await self._conn.execute(
                 "SELECT probe_index, mode, target_value, range_low, range_high, "
-                "pre_alert_offset, reminder_interval_secs "
+                "pre_alert_offset, reminder_interval_secs, label "
                 "FROM session_targets WHERE session_id = ?",
                 (session_id,),
             )
@@ -640,6 +704,7 @@ class HistoryStore:
                 range_high=r["range_high"],
                 pre_alert_offset=r["pre_alert_offset"] if r["pre_alert_offset"] is not None else 5.0,
                 reminder_interval_secs=r["reminder_interval_secs"] if r["reminder_interval_secs"] is not None else 0,
+                label=r["label"],
             )
             for r in rows
         ]
@@ -657,8 +722,8 @@ class HistoryStore:
                 await self._conn.execute(
                     "INSERT INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
-                    "range_low, range_high, pre_alert_offset, reminder_interval_secs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         address,
@@ -669,6 +734,7 @@ class HistoryStore:
                         t.range_high,
                         t.pre_alert_offset,
                         t.reminder_interval_secs,
+                        t.label,
                     ),
                 )
             await self._conn.commit()

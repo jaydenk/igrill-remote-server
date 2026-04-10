@@ -273,3 +273,47 @@ async def test_list_sessions_with_offset(store):
         await store.end_session(reason="user")
     sessions = await store.list_sessions(limit=2, offset=2)
     assert len(sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_start_session_with_name(store, sample_address):
+    result = await store.start_session([sample_address], "user", name="Sunday Brisket")
+    sid = result["session_id"]
+    async with store._lock:
+        cursor = await store._conn.execute("SELECT name FROM sessions WHERE id = ?", (sid,))
+        row = await cursor.fetchone()
+    assert row["name"] == "Sunday Brisket"
+
+
+@pytest.mark.asyncio
+async def test_update_session_name_and_notes(store, sample_address):
+    result = await store.start_session([sample_address], "user")
+    sid = result["session_id"]
+    await store.update_session(sid, name="Sunday Brisket", notes="Oak and cherry.")
+    async with store._lock:
+        cursor = await store._conn.execute("SELECT name, notes FROM sessions WHERE id = ?", (sid,))
+        row = await cursor.fetchone()
+    assert row["name"] == "Sunday Brisket"
+    assert row["notes"] == "Oak and cherry."
+
+
+@pytest.mark.asyncio
+async def test_update_session_partial(store, sample_address):
+    result = await store.start_session([sample_address], "user", name="Original")
+    sid = result["session_id"]
+    await store.update_session(sid, notes="Added notes only")
+    async with store._lock:
+        cursor = await store._conn.execute("SELECT name, notes FROM sessions WHERE id = ?", (sid,))
+        row = await cursor.fetchone()
+    assert row["name"] == "Original"
+    assert row["notes"] == "Added notes only"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_includes_name_notes(store, sample_address):
+    await store.start_session([sample_address], "user", name="Cook 1")
+    state = await store.get_session_state()
+    await store.update_session(state["current_session_id"], notes="Tasty")
+    sessions = await store.list_sessions(limit=5)
+    assert sessions[0]["name"] == "Cook 1"
+    assert sessions[0]["notes"] == "Tasty"
