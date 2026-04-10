@@ -164,6 +164,18 @@
 
     .session-banner-active {
       display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .session-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .session-banner-active-row {
+      display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
@@ -862,7 +874,7 @@
         grid-template-columns: 1fr;
       }
 
-      .session-banner-active {
+      .session-banner-active-row {
         flex-direction: column;
         align-items: stretch;
       }
@@ -928,20 +940,27 @@
     <div class="session-banner" id="sessionBanner">
       <div class="session-banner-idle" id="sessionIdle">
         <p>No active session</p>
+        <div style="margin: 0.25rem 0;">
+          <input type="text" id="sessionNameInput" placeholder="Session name (optional)"
+                 class="form-input" style="width: 100%; max-width: 300px; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem;">
+        </div>
         <button class="btn btn-primary" id="btnStartSession">Start Session</button>
       </div>
       <div class="session-banner-active" id="sessionActive" style="display:none;">
-        <div class="session-info">
-          <div class="session-stat">
-            <span class="session-stat-label">Duration</span>
-            <span class="session-stat-value" id="sessionDuration">&mdash;</span>
+        <div class="session-name" id="sessionName" style="display:none;"></div>
+        <div class="session-banner-active-row">
+          <div class="session-info">
+            <div class="session-stat">
+              <span class="session-stat-label">Duration</span>
+              <span class="session-stat-value" id="sessionDuration">&mdash;</span>
+            </div>
+            <div class="session-stat">
+              <span class="session-stat-label">Devices</span>
+              <span class="session-stat-value" id="sessionDeviceCount">0</span>
+            </div>
           </div>
-          <div class="session-stat">
-            <span class="session-stat-label">Devices</span>
-            <span class="session-stat-value" id="sessionDeviceCount">0</span>
-          </div>
+          <button class="btn btn-danger" id="btnEndSession">End Session</button>
         </div>
-        <button class="btn btn-danger" id="btnEndSession">End Session</button>
       </div>
     </div>
   </section>
@@ -1075,6 +1094,12 @@
     <h2>Start Session</h2>
 
     <div class="modal-section">
+      <div class="modal-section-title">Session Name</div>
+      <input type="text" id="modalSessionNameInput" placeholder="Session name (optional)"
+             style="width: 100%; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem; box-sizing: border-box;">
+    </div>
+
+    <div class="modal-section">
       <div class="modal-section-title">Devices</div>
       <div id="modalDeviceList">
         <p class="no-devices-message">No devices available.</p>
@@ -1109,7 +1134,8 @@
     id: null,
     startTs: null,
     devices: [],
-    targets: []
+    targets: [],
+    name: null
   };
   var durationTimer = null;
 
@@ -1240,6 +1266,14 @@
 
       var devCount = session.devices ? session.devices.length : Object.keys(devices).length;
       sessionDevCount.textContent = devCount;
+
+      var nameEl = document.getElementById("sessionName");
+      if (session.name) {
+        nameEl.textContent = session.name;
+        nameEl.style.display = "";
+      } else {
+        nameEl.style.display = "none";
+      }
     } else {
       sessionIdle.style.display = "";
       sessionActive.style.display = "none";
@@ -1314,7 +1348,22 @@
       var grid = el("div", "probes-grid");
       probes.forEach(function (p) {
         var probeEl = el("div", "probe");
-        probeEl.appendChild(el("div", "probe-label", "Probe " + p.index));
+
+        /* Check for a probe label from the active session targets */
+        var probeLabelText = "Probe " + p.index;
+        if (session.targets && session.targets.length > 0) {
+          var matchingTarget = null;
+          for (var ti = 0; ti < session.targets.length; ti++) {
+            if (session.targets[ti].probe_index === p.index) {
+              matchingTarget = session.targets[ti];
+              break;
+            }
+          }
+          if (matchingTarget && matchingTarget.label) {
+            probeLabelText = matchingTarget.label + " (Probe " + p.index + ")";
+          }
+        }
+        probeEl.appendChild(el("div", "probe-label", probeLabelText));
 
         if (p.unplugged) {
           probeEl.appendChild(el("div", "probe-temp unplugged", "Unplugged"));
@@ -1865,6 +1914,14 @@
     populateModalDevices();
     modalTargetList.textContent = "";
     targetCounter = 0;
+
+    /* Pre-fill modal name input from the idle banner input (if any value) */
+    var idleNameInput = document.getElementById("sessionNameInput");
+    var modalNameInput = document.getElementById("modalSessionNameInput");
+    if (idleNameInput && modalNameInput) {
+      modalNameInput.value = idleNameInput.value || "";
+    }
+
     sessionModal.classList.add("open");
   }
 
@@ -2027,9 +2084,16 @@
       targets.push(target);
     });
 
+    /* Read session name from modal input */
+    var modalNameInput = document.getElementById("modalSessionNameInput");
+    var sessionName = modalNameInput ? modalNameInput.value.trim() : "";
+
     /* Send session_start_request via WebSocket */
     if (ws && ws.readyState === WebSocket.OPEN) {
       var payload = {};
+      if (sessionName) {
+        payload.name = sessionName;
+      }
       if (selectedDevices.length > 0) {
         payload.deviceAddresses = selectedDevices;
       }
@@ -2043,6 +2107,11 @@
         payload: payload
       }));
     }
+
+    /* Clear name inputs */
+    if (modalNameInput) modalNameInput.value = "";
+    var idleNameInput = document.getElementById("sessionNameInput");
+    if (idleNameInput) idleNameInput.value = "";
 
     closeSessionModal();
   }
@@ -2183,6 +2252,7 @@
     session.startTs = payload.currentSessionStartTs || null;
     session.targets = payload.activeTargets || [];
     session.devices = payload.sessionDevices || [];
+    session.name = payload.currentSessionName || null;
     renderSessionBanner();
 
     /* If we loaded mid-session, fetch existing readings for charts */
@@ -2236,6 +2306,7 @@
     session.startTs = payload.sessionStartTs || null;
     session.targets = payload.targets || session.targets;
     session.devices = payload.devices || session.devices;
+    session.name = payload.name || null;
     probeAlertStates = {};
     clearChartData();
     setChartsVisible(true);
@@ -2249,6 +2320,7 @@
       session.startTs = payload.sessionStartTs || null;
       session.targets = payload.targets || [];
       session.devices = payload.devices || [];
+      session.name = payload.name || null;
       probeAlertStates = {};
       clearChartData();
       setChartsVisible(true);
@@ -2262,6 +2334,7 @@
     session.startTs = null;
     session.targets = [];
     session.devices = [];
+    session.name = null;
     probeAlertStates = {};
     /* Keep charts visible with final data — don't destroy until new session or tab switch */
     renderSessionBanner();
@@ -2403,8 +2476,22 @@
         card.classList.add("selected");
       }
 
-      var dateEl = el("div", "session-card-date", formatHistoryDate(s.startTs));
+      var primaryText = s.name || formatHistoryDate(s.startTs);
+      var dateEl = el("div", "session-card-date", primaryText);
       card.appendChild(dateEl);
+
+      /* If name was shown as primary, show date as secondary */
+      if (s.name) {
+        card.appendChild(el("div", "session-card-meta", formatHistoryDate(s.startTs)));
+      }
+
+      /* Notes preview */
+      if (s.notes) {
+        var notesPreview = s.notes.length > 80 ? s.notes.substring(0, 80) + "\u2026" : s.notes;
+        var notesEl = el("div", "session-card-notes", notesPreview);
+        notesEl.style.cssText = "font-size:0.8rem; color:var(--text-muted); margin-top:0.25rem; font-style:italic;";
+        card.appendChild(notesEl);
+      }
 
       var metaEl = el("div", "session-card-meta");
       metaEl.appendChild(el("span", null, "Duration: " + formatHistoryDuration(s.startTs, s.endTs)));
@@ -2442,8 +2529,15 @@
 
     /* Render header */
     historyDetailHeader.textContent = "";
-    var h3 = el("h3", null, "Session — " + formatHistoryDate(sessionMeta.startTs));
+    var detailTitle = sessionMeta.name || "Session";
+    var h3 = el("h3", null, detailTitle + " \u2014 " + formatHistoryDate(sessionMeta.startTs));
     historyDetailHeader.appendChild(h3);
+
+    if (sessionMeta.notes) {
+      var notesP = el("p", null, sessionMeta.notes);
+      notesP.style.cssText = "color:var(--text-secondary); font-style:italic; margin-top:0.5rem; font-size:0.9rem;";
+      historyDetailHeader.appendChild(notesP);
+    }
 
     var metaDiv = el("div", "detail-meta");
     metaDiv.appendChild(el("span", null, "Duration: " + formatHistoryDuration(sessionMeta.startTs, sessionMeta.endTs)));
@@ -2508,9 +2602,17 @@
     var probeConfigs = [];
     for (var p = 0; p < sortedProbes.length; p++) {
       var idx = sortedProbes[p];
+      /* Use target label if available */
+      var probeLabel = "Probe " + idx;
+      for (var tl = 0; tl < targets.length; tl++) {
+        if (targets[tl].probe_index === idx && targets[tl].label) {
+          probeLabel = targets[tl].label + " (Probe " + idx + ")";
+          break;
+        }
+      }
       probeConfigs.push({
         index: idx,
-        label: "Probe " + idx,
+        label: probeLabel,
         color: PROBE_COLOURS[(idx - 1) % PROBE_COLOURS.length]
       });
     }
@@ -2794,7 +2896,13 @@
       var avgTemp = temps.reduce(function (sum, v) { return sum + v; }, 0) / temps.length;
 
       var card = el("div", "history-summary-card");
-      card.appendChild(el("div", "summary-probe-label", "Probe " + probeIdx));
+
+      /* Use probe label if available in targets */
+      var summaryLabel = "Probe " + probeIdx;
+      if (probeTarget && probeTarget.label) {
+        summaryLabel = probeTarget.label + " (Probe " + probeIdx + ")";
+      }
+      card.appendChild(el("div", "summary-probe-label", summaryLabel));
 
       var addRow = function (label, value) {
         var row = el("div", "summary-row");

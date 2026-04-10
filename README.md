@@ -98,7 +98,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls, BLE state indicators, live temperature charts (uPlot), past session browsing with full-timeline charts and summary statistics, and runtime log level management. |
+| `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls (including optional session name input), BLE state indicators, live temperature charts (uPlot) with probe labels, past session browsing with names, notes, and full-timeline charts and summary statistics, and runtime log level management. |
 | `GET` | `/health` | Health check with uptime, device counts, active session ID, poll interval, and scan interval. |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
 | `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
@@ -217,7 +217,7 @@ service/
   web/
     dashboard.py         # Dashboard route handler and static file serving
     static/
-      index.html         # Tab-based monitoring dashboard with live view, session history with full-timeline charts and summary statistics, settings with device info and runtime log level controls (vanilla HTML/CSS/JS, uPlot)
+      index.html         # Tab-based monitoring dashboard with live view (session name, probe labels), session history with names, notes, and full-timeline charts and summary statistics, settings with device info and runtime log level controls (vanilla HTML/CSS/JS, uPlot)
 tests/
   conftest.py            # Shared pytest fixtures
   test_alerts.py         # AlertEvaluator tests
