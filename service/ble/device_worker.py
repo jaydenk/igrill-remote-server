@@ -75,6 +75,14 @@ class DeviceWorker:
         self._stop = asyncio.Event()
         self._connected_logged = False
         self._seq = 0
+        # Per-connection disconnect signal — set from BleakClient's
+        # disconnected_callback so the poll loop can exit its sleep early
+        # instead of waiting out the full poll_interval after a BLE drop.
+        self._disconnect_event: Optional[asyncio.Event] = None
+        # Probes that previously returned ATT "Unlikely Error" — treated as
+        # permanently unplugged for this connection to avoid log spam and
+        # wasted GATT reads on empty sockets.
+        self._known_unplugged: set[str] = set()
         self._state_machine = ConnectionStateMachine(
             max_backoff=max_backoff,
             on_change=self._on_state_change,
@@ -99,7 +107,18 @@ class DeviceWorker:
             try:
                 self._state_machine.transition(ConnectionState.CONNECTING)
                 LOG.debug("Connecting to %s (%s)", self.address, self.name or "unknown")
-                async with BleakClient(self.address, timeout=self.connect_timeout) as client:
+                # Fresh disconnect signal for each connection attempt. Must be
+                # created here (not in __init__) so a prior disconnect does
+                # not leave the event in a set state for the next loop.
+                self._disconnect_event = asyncio.Event()
+                # Reset per-connection probe-unplugged cache — the user may
+                # have plugged/unplugged probes while we were disconnected.
+                self._known_unplugged.clear()
+                async with BleakClient(
+                    self.address,
+                    timeout=self.connect_timeout,
+                    disconnected_callback=self._on_ble_disconnected,
+                ) as client:
                     self._connected_logged = False
                     services = client.services
                     if services is None:
@@ -168,6 +187,16 @@ class DeviceWorker:
             old_state.value,
             new_state.value,
         )
+
+    def _on_ble_disconnected(self, _client: BleakClient) -> None:
+        """BleakClient disconnected callback — fired by bleak's internal
+        BlueZ d-bus watcher the moment the peripheral drops the link. We
+        set the per-connection event so the poll loop's interval sleep
+        returns immediately instead of waiting out the full poll_interval."""
+        LOG.info("ble_disconnected address=%s", self.address)
+        event = self._disconnect_event
+        if event is not None and not event.is_set():
+            event.set()
 
     async def _publish_state_change_event(self) -> None:
         """Publish a device_state_change event to the store's event queue."""
@@ -340,7 +369,12 @@ class DeviceWorker:
                         envelope = make_envelope(alert_evt["type"], alert_evt["payload"])
                         await self.store.publish_event(envelope)
 
-            await asyncio.sleep(self.poll_interval)
+            # Sleep until next poll, OR wake immediately if the BLE link
+            # drops. Without this race, a BLE disconnect during the sleep
+            # is detected up to poll_interval seconds late — which looks
+            # to clients like stale data followed by a long "connecting"
+            # stall on the next iteration.
+            await self._wait_until_next_poll()
 
     async def _read_metrics(
         self, client: BleakClient, services, probe_uuids: List[str]
@@ -367,6 +401,17 @@ class DeviceWorker:
 
         probes: List[Dict[str, object]] = []
         for index, uuid in enumerate(probe_uuids, start=1):
+            if uuid in self._known_unplugged:
+                # Probe socket is empty — emit a synthetic unplugged entry
+                # so clients can still see the slot exists, but skip the
+                # GATT read to avoid the ATT "Unlikely Error" spam.
+                probes.append({
+                    "index": index,
+                    "temperature": None,
+                    "raw": None,
+                    "unplugged": True,
+                })
+                continue
             probe_data = await self._read_char(client, uuid, services)
             if not probe_data:
                 continue
@@ -403,6 +448,12 @@ class DeviceWorker:
     async def _read_char(self, client: BleakClient, uuid: str, services) -> Optional[bytes]:
         if services.get_characteristic(uuid) is None:
             return None
+        # Short-circuit if the BLE link already dropped earlier in this poll
+        # cycle. Without this, every subsequent characteristic read in
+        # _read_metrics hits "Not connected" and logs a WARNING, producing
+        # a noisy burst of errors for what is just the normal disconnect path.
+        if self._disconnect_event is not None and self._disconnect_event.is_set():
+            return None
         try:
             data = await asyncio.wait_for(client.read_gatt_char(uuid), timeout=self.timeout)
             LOG.debug("Read %s from %s: %s", uuid, self.address, data.hex())
@@ -414,5 +465,49 @@ class DeviceWorker:
             LOG.warning("Connection error reading %s from %s: %s", uuid, self.address, exc)
             raise
         except Exception as exc:
+            exc_text = str(exc)
+            # iGrill V2/V202 returns ATT "Unlikely Error" (0x0e) when
+            # reading a probe characteristic whose physical socket is
+            # empty, instead of the documented UNPLUGGED_PROBE_CONSTANT
+            # sentinel value. Treat this as a known "unplugged" signal
+            # so we can skip it on subsequent polls without spamming the
+            # log every 15 seconds.
+            if "Unlikely Error" in exc_text and uuid in PROBE_TEMPERATURE_UUIDS:
+                self._known_unplugged.add(uuid)
+                LOG.debug(
+                    "Probe %s on %s returned Unlikely Error — treating as unplugged",
+                    uuid,
+                    self.address,
+                )
+                return None
+            # BlueZ/bleak surfaces "Not connected" when a read is attempted
+            # after the link drops mid-poll. That's the normal disconnect
+            # path, not a real error — log at DEBUG so it doesn't mask
+            # actual failures. The disconnect_event is already set, so the
+            # poll loop will exit on the next iteration anyway.
+            if "Not connected" in exc_text or "org.bluez.Error.NotConnected" in exc_text:
+                LOG.debug(
+                    "Read %s from %s skipped during disconnect",
+                    uuid,
+                    self.address,
+                )
+                return None
             LOG.warning("Read error %s from %s: %s", uuid, self.address, exc)
             return None
+
+    async def _wait_until_next_poll(self) -> None:
+        """Sleep for ``poll_interval`` seconds OR return immediately if the
+        BLE link drops. Uses the per-connection disconnect event signalled
+        by :meth:`_on_ble_disconnected`. On normal timeout this is a no-op
+        and the outer loop's ``client.is_connected`` check proceeds."""
+        event = self._disconnect_event
+        if event is None:
+            # Defensive fallback — should never happen during a live poll,
+            # but avoids blowing up if _poll_loop is ever called outside a
+            # run() iteration in a test or future refactor.
+            await asyncio.sleep(self.poll_interval)
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout=self.poll_interval)
+        except asyncio.TimeoutError:
+            pass  # Normal poll interval elapsed; continue polling.

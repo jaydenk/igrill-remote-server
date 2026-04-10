@@ -157,6 +157,12 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 
 Each device worker manages a six-state connection lifecycle: `discovered` -> `connecting` -> `authenticating` -> `polling` -> `disconnected` -> `backoff` -> `connecting` (retry). On disconnect or error, the worker uses exponential backoff (starting at 2 seconds, capped at `IGRILL_MAX_BACKOFF`) before attempting reconnection. A successful connection resets the backoff counter. Authentication is retried up to three times before failing. Probe readings are zeroed on disconnect to avoid displaying stale data.
 
+BLE drops are detected reactively via `BleakClient`'s `disconnected_callback`, which sets a per-connection asyncio event that the poll loop awaits in place of a plain `asyncio.sleep(poll_interval)`. This keeps detection latency close to the BlueZ d-bus round trip (typically under a second) instead of up to a full poll interval. Probe characteristics that return ATT "Unlikely Error" (iGrill V2/V202 empty-socket behaviour) are cached per connection and emitted as synthetic unplugged entries, so empty sockets do not spam the log or waste GATT reads on each poll.
+
+### Scan Loop Observability
+
+Each scan cycle emits a single `scan_complete total=N matches=M workers=W new=X` INFO log: `total` is the number of BLE devices seen by the adapter, `matches` is how many had the configured `IGRILL_MAC_PREFIX`, `workers` is the total active device workers, and `new` is how many workers were spawned this cycle. An iGrill that never appears (matches always 0) despite being powered on usually means it is already connected to another central — iGrill peripherals stop advertising while connected.
+
 ### User-Initiated Sessions
 
 Sessions are user-initiated only — no session is auto-created on startup or when a device connects. The device worker always polls BLE and broadcasts live readings to WebSocket clients, but only records to the database and evaluates alert targets when a session is active and the device is part of it.

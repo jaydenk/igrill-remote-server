@@ -65,9 +65,12 @@ class DeviceManager:
                     )
                     for device, adv in discovered.values()
                 ]
+                matches = 0
+                new_workers = 0
                 for address, name, rssi in scan_items:
                     if not address.lower().startswith(self.mac_prefix):
                         continue
+                    matches += 1
                     LOG.debug("Discovered %s (%s) rssi=%s", address, name, rssi)
                     await self.store.upsert(
                         address,
@@ -89,8 +92,20 @@ class DeviceManager:
                         )
                         self._workers[address] = worker
                         self._tasks[address] = asyncio.create_task(worker.run())
+                        new_workers += 1
                     else:
                         self._workers[address].update_name(name)
+                # Emit a single INFO-level summary per scan so operators can
+                # see the scan loop is alive and confirm whether any iGrill
+                # devices are advertising. Previously this ran silently,
+                # making "no devices" vs "scan not running" indistinguishable.
+                LOG.info(
+                    "scan_complete total=%d matches=%d workers=%d new=%d",
+                    len(scan_items),
+                    matches,
+                    len(self._workers),
+                    new_workers,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
