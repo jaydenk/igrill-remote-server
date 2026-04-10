@@ -414,9 +414,10 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         if single:
             device_addresses = [single]
 
+    snapshot = await ctx.store.snapshot()
+
     # If still empty, use all currently connected devices
     if not device_addresses:
-        snapshot = await ctx.store.snapshot()
         device_addresses = [
             addr for addr, dev in snapshot.items()
             if dev.get("connected")
@@ -426,6 +427,22 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         await send_error(
             ctx.ws, "no_devices",
             "No devices specified and none are currently connected.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    # Validate every explicitly requested address exists in the device
+    # store before we write anything. Previously this handler upserted
+    # unknown addresses as a side-effect, which let a misbehaving
+    # client pollute the in-memory store with ghost entries that
+    # persisted until server restart and later satisfied
+    # session_add_device_request "device_not_found" checks incorrectly.
+    unknown = [addr for addr in device_addresses if addr not in snapshot]
+    if unknown:
+        await send_error(
+            ctx.ws, "device_not_found",
+            f"Unknown device address(es): {', '.join(unknown)}. "
+            "Device must be discovered by BLE scan first.",
             request_id=ctx.request_id,
         )
         return
