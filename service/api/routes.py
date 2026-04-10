@@ -70,8 +70,12 @@ async def session_detail_handler(request: web.Request) -> web.Response:
     readings = await history.get_session_readings(session_id)
     targets = await history.get_targets(session_id)
     devices = await history.get_session_devices(session_id)
+    name = await history.get_session_name(session_id)
+    notes = await history.get_session_notes(session_id)
     return web.json_response({
         "sessionId": session_id,
+        "name": name,
+        "notes": notes,
         "devices": devices,
         "targets": [t.to_dict() for t in targets],
         "readings": readings,
