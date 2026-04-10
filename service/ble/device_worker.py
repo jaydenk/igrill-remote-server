@@ -401,17 +401,6 @@ class DeviceWorker:
 
         probes: List[Dict[str, object]] = []
         for index, uuid in enumerate(probe_uuids, start=1):
-            if uuid in self._known_unplugged:
-                # Probe socket is empty — emit a synthetic unplugged entry
-                # so clients can still see the slot exists, but skip the
-                # GATT read to avoid the ATT "Unlikely Error" spam.
-                probes.append({
-                    "index": index,
-                    "temperature": None,
-                    "raw": None,
-                    "unplugged": True,
-                })
-                continue
             probe_data = await self._read_char(client, uuid, services)
             if not probe_data:
                 continue
