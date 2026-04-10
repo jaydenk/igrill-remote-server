@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import time
 
@@ -82,6 +84,60 @@ async def session_detail_handler(request: web.Request) -> web.Response:
     })
 
 
+async def export_handler(request: web.Request) -> web.Response:
+    """GET /api/sessions/{id}/export — download session data as CSV or JSON."""
+    history: HistoryStore = request.app["history"]
+    session_id = request.match_info["id"]
+    if not await history.session_exists(session_id):
+        return web.json_response({"error": "session not found"}, status=404)
+
+    readings = await history.get_session_readings(session_id)
+    targets = await history.get_targets(session_id)
+    name = await history.get_session_name(session_id)
+
+    # Build label lookup from targets
+    label_by_probe: dict[int, str] = {}
+    for t in targets:
+        if t.label:
+            label_by_probe[t.probe_index] = t.label
+
+    fmt = request.query.get("format", "json").lower()
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["timestamp", "probe_index", "label", "temperature_c", "battery_pct", "propane_pct"])
+        for r in readings:
+            ts = r.get("recorded_at", "")
+            battery = r.get("battery")
+            propane = r.get("propane")
+            probes = r.get("probes", [])
+            for p in probes:
+                idx = p.get("index", 0)
+                temp = p.get("temperature")
+                label = label_by_probe.get(idx, "")
+                writer.writerow([ts, idx, label, temp, battery, propane])
+
+        safe_name = (name or session_id).replace('"', "'")
+        return web.Response(
+            text=buf.getvalue(),
+            content_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}.csv"',
+            },
+        )
+
+    # Default: enriched JSON
+    for r in readings:
+        for p in r.get("probes", []):
+            idx = p.get("index", 0)
+            p["label"] = label_by_probe.get(idx)
+    return web.json_response({
+        "sessionId": session_id,
+        "name": name,
+        "readings": readings,
+    })
+
+
 async def log_levels_handler(request: web.Request) -> web.Response:
     """PUT /api/config/log-levels — runtime log level update."""
     from service.api.websocket import is_authorized
@@ -116,4 +172,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/sessions", sessions_handler)
     app.router.add_get("/api/sessions/{id}", session_detail_handler)
+    app.router.add_get("/api/sessions/{id}/export", export_handler)
     app.router.add_put("/api/config/log-levels", log_levels_handler)
