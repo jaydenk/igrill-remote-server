@@ -15,10 +15,11 @@ LOG = logging.getLogger("igrill.session")
 # Map of target version -> list of SQL statements to apply.
 # Add new migrations here as the schema evolves.
 MIGRATIONS: dict[int, list[str]] = {
-    # Example for future use:
-    # 2: [
-    #     "ALTER TABLE probe_readings ADD COLUMN unit TEXT DEFAULT 'C'",
-    # ],
+    2: [
+        "ALTER TABLE sessions ADD COLUMN name TEXT",
+        "ALTER TABLE sessions ADD COLUMN notes TEXT",
+        "ALTER TABLE session_targets ADD COLUMN label TEXT",
+    ],
 }
 
 

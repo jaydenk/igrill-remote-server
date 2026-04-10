@@ -149,3 +149,24 @@ async def test_legacy_schema_upgrade(tmp_db):
             "VALUES ('abcdef1234567890abcdef1234567890', '2026-01-01T00:00:00Z', 'user')"
         )
         await conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_session_enrichment_columns(tmp_db):
+    """Migration v2 adds name/notes to sessions and label to session_targets."""
+    async with aiosqlite.connect(tmp_db) as conn:
+        conn.row_factory = aiosqlite.Row
+        await init_db(conn)
+        from service.db.migrations import run_migrations
+        await run_migrations(conn)
+
+        # Verify sessions columns
+        cursor = await conn.execute("PRAGMA table_info(sessions)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        assert "name" in cols, "sessions.name column missing"
+        assert "notes" in cols, "sessions.notes column missing"
+
+        # Verify session_targets column
+        cursor = await conn.execute("PRAGMA table_info(session_targets)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        assert "label" in cols, "session_targets.label column missing"
