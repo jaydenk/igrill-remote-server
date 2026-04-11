@@ -1,0 +1,10 @@
+{
+  "planPath": "docs/plans/2026-04-11-simulated-cook-session.md",
+  "tasks": [
+    {"id": 14, "subject": "Task 1: Temperature curve module", "status": "pending"},
+    {"id": 15, "subject": "Task 2: SimulationRunner core", "status": "pending", "blockedBy": [14]},
+    {"id": 16, "subject": "Task 3: API endpoints and route registration", "status": "pending", "blockedBy": [14, 15]},
+    {"id": 17, "subject": "Task 4: Deploy and end-to-end test", "status": "pending", "blockedBy": [14, 15, 16]}
+  ],
+  "lastUpdated": "2026-04-11T18:30:00+09:30"
+}
