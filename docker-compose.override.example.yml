@@ -1,0 +1,28 @@
+# Deployment-specific overrides (copy to docker-compose.override.yml)
+#
+# APNS push notifications and Traefik reverse proxy configuration.
+# The override file is gitignored — your credentials stay local.
+
+services:
+  igrill:
+    environment:
+      # --- APNS Push Notifications ---
+      - IGRILL_APNS_KEY_PATH=${IGRILL_APNS_KEY_PATH:-/app/AuthKey.p8}
+      - IGRILL_APNS_KEY_ID=${IGRILL_APNS_KEY_ID:-}
+      - IGRILL_APNS_TEAM_ID=${IGRILL_APNS_TEAM_ID:-}
+      - IGRILL_APNS_BUNDLE_ID=${IGRILL_APNS_BUNDLE_ID:-}
+      - IGRILL_APNS_USE_SANDBOX=${IGRILL_APNS_USE_SANDBOX:-true}
+    volumes:
+      - ./AuthKey.p8:/app/AuthKey.p8:ro
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.igrill.rule=Host(`igrill.${HOSTNAME}`)"
+      - "traefik.http.routers.igrill.entrypoints=web-secure"
+      - "traefik.http.routers.igrill.tls.certresolver=myresolver"
+      - "traefik.http.services.igrill.loadbalancer.server.port=${IGRILL_PORT:-39120}"
+
+networks:
+  proxy:
+    external: true

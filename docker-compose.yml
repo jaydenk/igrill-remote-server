@@ -21,11 +21,6 @@ services:
       - IGRILL_RECONNECT_GRACE=${IGRILL_RECONNECT_GRACE:-60}
       - IGRILL_DB_PATH=${IGRILL_DB_PATH:-/data/igrill.db}
       - IGRILL_SESSION_TOKEN=${IGRILL_SESSION_TOKEN:-}
-      - IGRILL_APNS_KEY_PATH=${IGRILL_APNS_KEY_PATH:-}
-      - IGRILL_APNS_KEY_ID=${IGRILL_APNS_KEY_ID:-}
-      - IGRILL_APNS_TEAM_ID=${IGRILL_APNS_TEAM_ID:-}
-      - IGRILL_APNS_BUNDLE_ID=${IGRILL_APNS_BUNDLE_ID:-}
-      - IGRILL_APNS_USE_SANDBOX=${IGRILL_APNS_USE_SANDBOX:-true}
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
     ports:
       - "${IGRILL_PORT:-39120}:${IGRILL_PORT:-39120}"
@@ -33,8 +28,6 @@ services:
       - /run/dbus:/run/dbus
       - /etc/localtime:/etc/localtime:ro
       - igrill-data:/data
-      # Uncomment to mount APNS authentication key
-      # - ./AuthKey.p8:/app/AuthKey.p8:ro
     restart: unless-stopped
 
 volumes:
