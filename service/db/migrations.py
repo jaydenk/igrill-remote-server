@@ -20,6 +20,16 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE sessions ADD COLUMN notes TEXT",
         "ALTER TABLE session_targets ADD COLUMN label TEXT",
     ],
+    3: [
+        """
+        CREATE TABLE IF NOT EXISTS push_tokens (
+            token       TEXT PRIMARY KEY,
+            live_activity_token TEXT,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """,
+    ],
 }
 
 

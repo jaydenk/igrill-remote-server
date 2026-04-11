@@ -158,7 +158,22 @@ async def test_partial_migration_rolls_back(tmp_db):
 
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             row = await cursor.fetchone()
-            assert row[0] == 2
+            assert row[0] == 3
     finally:
         MIGRATIONS.clear()
         MIGRATIONS.update(original)
+
+
+@pytest.mark.asyncio
+async def test_migration_v3_creates_push_tokens(store):
+    """Migration v3 should create the push_tokens table."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='push_tokens'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "push_tokens table should exist after migration"
+
+    # Verify columns
+    async with store._conn.execute("PRAGMA table_info(push_tokens)") as cursor:
+        columns = {r[1] for r in await cursor.fetchall()}
+    assert columns == {"token", "live_activity_token", "created_at", "updated_at"}
