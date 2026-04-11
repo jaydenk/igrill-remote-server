@@ -65,6 +65,11 @@ class Config:
     log_level_session: str = ""
     log_level_alert: str = ""
     log_level_http: str = ""
+    apns_key_path: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = ""
+    apns_use_sandbox: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -94,4 +99,9 @@ class Config:
             log_level_session=os.getenv("IGRILL_LOG_LEVEL_SESSION", ""),
             log_level_alert=os.getenv("IGRILL_LOG_LEVEL_ALERT", ""),
             log_level_http=os.getenv("IGRILL_LOG_LEVEL_HTTP", ""),
+            apns_key_path=os.getenv("IGRILL_APNS_KEY_PATH", ""),
+            apns_key_id=os.getenv("IGRILL_APNS_KEY_ID", ""),
+            apns_team_id=os.getenv("IGRILL_APNS_TEAM_ID", ""),
+            apns_bundle_id=os.getenv("IGRILL_APNS_BUNDLE_ID", ""),
+            apns_use_sandbox=os.getenv("IGRILL_APNS_USE_SANDBOX", "true").lower() in ("true", "1", "yes"),
         )

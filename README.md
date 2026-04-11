@@ -91,6 +91,11 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `IGRILL_LOG_LEVEL_HTTP` | *(global)* | Override log level for the HTTP subsystem (`igrill.http`). |
 | `IGRILL_SESSION_TOKEN` | *(empty)* | If set, requires `Authorization: Bearer <token>` on WebSocket session-control messages. |
 | `IGRILL_CORS_ORIGIN` | *(empty)* | If set, adds CORS `Access-Control-Allow-Origin` headers (e.g. `*` for development). A warning is logged if set to `*`. |
+| `IGRILL_APNS_KEY_PATH` | *(empty)* | Path to the APNS `.p8` private key file. Push notifications are disabled when any APNS credential is missing. |
+| `IGRILL_APNS_KEY_ID` | *(empty)* | Apple APNS key identifier. |
+| `IGRILL_APNS_TEAM_ID` | *(empty)* | Apple Developer Team ID. |
+| `IGRILL_APNS_BUNDLE_ID` | *(empty)* | iOS app bundle identifier (e.g. `com.example.iGrillRemote`). |
+| `IGRILL_APNS_USE_SANDBOX` | `true` | Use the APNS sandbox environment (`true`, `1`, `yes`) or production (`false`, `0`, `no`). |
 
 ## API Reference
 
@@ -215,6 +220,8 @@ service/
     device.py            # DeviceStore — async-safe in-memory device state
     reading.py           # Temperature probe parsing and reading payload builder
     session.py           # TargetConfig dataclass for probe target temperatures
+  push/
+    service.py           # APNS push notification service (alerts and Live Activity updates)
   web/
     dashboard.py         # Dashboard route handler and static file serving
     static/
@@ -232,6 +239,7 @@ tests/
   test_protocol.py       # BLE protocol module tests
   test_integration.py    # Full-server integration tests
   test_routes.py         # HTTP route handler tests
+  test_push_service.py   # Push notification service tests
   test_schema.py         # Database schema tests
 ```
 
