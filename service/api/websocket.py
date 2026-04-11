@@ -656,7 +656,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     client = WebSocketClient(ws)
     hub.add(client)
 
-    peer = request.remote or "unknown"
+    peer = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or "unknown"
     LOG.info("WebSocket client connected from %s (total: %d)", peer, len(hub.clients))
 
     try:

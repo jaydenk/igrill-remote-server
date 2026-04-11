@@ -178,11 +178,16 @@ class PushService:
 
         current_temp = payload.get("currentTemp")
         target_value = target.get("target_value")
+        range_low = target.get("range_low")
+        range_high = target.get("range_high")
 
-        if current_temp is not None and target_value is not None:
-            body = f"{probe_name} is at {current_temp:.0f}\u00b0 (target: {target_value:.0f}\u00b0)"
-        elif current_temp is not None:
-            body = f"{probe_name} is at {current_temp:.0f}\u00b0"
+        if current_temp is not None:
+            if target_value is not None:
+                body = f"{probe_name} is at {current_temp:.0f}\u00b0 (target: {target_value:.0f}\u00b0)"
+            elif range_low is not None and range_high is not None:
+                body = f"{probe_name} is at {current_temp:.0f}\u00b0 (range: {range_low:.0f}\u2013{range_high:.0f}\u00b0)"
+            else:
+                body = f"{probe_name} is at {current_temp:.0f}\u00b0"
         else:
             body = probe_name
 
@@ -317,7 +322,8 @@ class PushService:
         Extracts probe data and device metadata into the format expected
         by the iOS Live Activity.
         """
-        data = reading.get("data", reading)
+        payload = reading.get("payload", {})
+        data = payload.get("data", {})
         probes = data.get("probes", [])
 
         return {

@@ -91,6 +91,8 @@ class AlertEvaluator:
                 "target": target.to_dict(),
             }
 
+            approaching_high = False
+
             if target.mode == "fixed":
                 reached = temp >= effective_target
                 exceeded = temp > effective_target
