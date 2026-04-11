@@ -97,6 +97,47 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `IGRILL_APNS_BUNDLE_ID` | *(empty)* | iOS app bundle identifier (e.g. `com.example.iGrillRemote`). |
 | `IGRILL_APNS_USE_SANDBOX` | `true` | Use the APNS sandbox environment (`true`, `1`, `yes`) or production (`false`, `0`, `no`). |
 
+## Push Notifications
+
+Push notifications are **optional**. When configured, the server sends APNS alerts to registered iOS devices for target-reached events and other session alerts. Without APNS credentials the server runs normally — all alerts are still delivered to connected WebSocket clients.
+
+### Obtaining an APNS Key
+
+1. Sign in to the [Apple Developer Portal](https://developer.apple.com/account/).
+2. Navigate to **Certificates, Identifiers & Profiles** → **Keys**.
+3. Create a new key with the **Apple Push Notifications service (APNs)** capability enabled.
+4. Download the resulting `.p8` file (e.g. `AuthKey_XXXXXXXXXX.p8`). This file can only be downloaded once — store it securely.
+5. Note the **Key ID** shown on the key details page and your **Team ID** from the top-right of the portal (or **Membership** → **Team ID**).
+
+### Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `IGRILL_APNS_KEY_PATH` | *(empty)* | Path to the `.p8` private key file inside the container. Push notifications are disabled when any APNS credential is missing. |
+| `IGRILL_APNS_KEY_ID` | *(empty)* | The Key ID shown in the Apple Developer Portal when the key was created. |
+| `IGRILL_APNS_TEAM_ID` | *(empty)* | Your Apple Developer Team ID. |
+| `IGRILL_APNS_BUNDLE_ID` | *(empty)* | The iOS app's bundle identifier (e.g. `com.example.iGrillRemote`). |
+| `IGRILL_APNS_USE_SANDBOX` | `true` | Set to `true` for development/TestFlight builds or `false` for production App Store builds. |
+
+### Docker Setup
+
+Mount the `.p8` key file into the container by uncommenting the volume line in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./AuthKey.p8:/app/AuthKey.p8:ro
+```
+
+Then set the environment variables in your `.env` file:
+
+```env
+IGRILL_APNS_KEY_PATH=/app/AuthKey.p8
+IGRILL_APNS_KEY_ID=XXXXXXXXXX
+IGRILL_APNS_TEAM_ID=YYYYYYYYYY
+IGRILL_APNS_BUNDLE_ID=com.example.iGrillRemote
+IGRILL_APNS_USE_SANDBOX=true
+```
+
 ## API Reference
 
 ### REST Endpoints
@@ -108,6 +149,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
 | `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
 | `GET` | `/api/sessions/{id}/export` | Export session data as CSV (`?format=csv`) or enriched JSON (`?format=json`, default). CSV columns: `timestamp`, `probe_index`, `label`, `temperature_c`, `battery_pct`, `propane_pct`. |
+| `POST` | `/api/v1/devices/push-token` | Register or update an APNS push token. Body: `{"token": "hex_device_token", "liveActivityToken": "hex_la_token"}`. The `liveActivityToken` field is optional. |
 | `PUT` | `/api/config/log-levels` | Runtime log level update (requires authorisation). |
 
 ### WebSocket Protocol (v2)
