@@ -1,0 +1,20 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Avahi mDNS service advertisement for iGrill Remote.
+
+  Copy this file to /etc/avahi/services/igrill.service on the Docker host
+  and replace the hostname in the txt-record with your Traefik FQDN.
+  Avahi picks up changes automatically — no restart needed.
+
+  The iOS app discovers this service via Bonjour (_igrill._tcp) and
+  extracts the url from the TXT record to connect automatically.
+-->
+<service-group>
+  <name>iGrill Remote</name>
+  <service>
+    <type>_igrill._tcp</type>
+    <port>443</port>
+    <txt-record>url=wss://igrill.example.com/ws</txt-record>
+  </service>
+</service-group>
