@@ -137,6 +137,25 @@ async def export_handler(request: web.Request) -> web.Response:
     })
 
 
+async def push_token_handler(request: web.Request) -> web.Response:
+    """POST /api/v1/devices/push-token — register or update a push token."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
+    token = body.get("token")
+    if not token or not isinstance(token, str):
+        return web.json_response({"error": "token is required"}, status=400)
+
+    la_token = body.get("liveActivityToken")
+    push_service = request.app.get("push_service")
+    if push_service:
+        await push_service.upsert_token(token, live_activity_token=la_token)
+
+    return web.json_response({"ok": True})
+
+
 async def log_levels_handler(request: web.Request) -> web.Response:
     """PUT /api/config/log-levels — runtime log level update."""
     from service.api.websocket import is_authorized
@@ -172,4 +191,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/sessions", sessions_handler)
     app.router.add_get("/api/sessions/{id}", session_detail_handler)
     app.router.add_get("/api/sessions/{id}/export", export_handler)
+    app.router.add_post("/api/v1/devices/push-token", push_token_handler)
     app.router.add_put("/api/config/log-levels", log_levels_handler)
