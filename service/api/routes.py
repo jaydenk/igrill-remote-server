@@ -193,6 +193,52 @@ async def log_levels_handler(request: web.Request) -> web.Response:
     return web.json_response({"results": results})
 
 
+async def simulate_start_handler(request: web.Request) -> web.Response:
+    """POST /api/v1/simulate/start — start a simulated cook session."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    simulator = request.app.get("simulator")
+    if not simulator:
+        return web.json_response({"error": "simulator not available"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    speed = body.get("speed", 10)
+    probes = body.get("probes", 4)
+
+    try:
+        speed = float(speed)
+        probes = int(probes)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "speed must be a number, probes must be an integer"}, status=400)
+
+    result = await simulator.start(speed=speed, probes=probes)
+    if "error" in result:
+        return web.json_response(result, status=409)
+    return web.json_response(result)
+
+
+async def simulate_stop_handler(request: web.Request) -> web.Response:
+    """POST /api/v1/simulate/stop — stop the running simulation."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    simulator = request.app.get("simulator")
+    if not simulator:
+        return web.json_response({"error": "simulator not available"}, status=503)
+
+    result = await simulator.stop()
+    if "error" in result:
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
 # ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
@@ -210,3 +256,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/devices/push-token", push_token_handler)
     app.router.add_post("/api/v1/push/test", push_test_handler)
     app.router.add_put("/api/config/log-levels", log_levels_handler)
+    app.router.add_post("/api/v1/simulate/start", simulate_start_handler)
+    app.router.add_post("/api/v1/simulate/stop", simulate_stop_handler)

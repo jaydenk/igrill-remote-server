@@ -39,7 +39,7 @@ async def cors_middleware(request: web.Request, handler) -> web.StreamResponse:
         response = await handler(request)
     if _CORS_ORIGIN:
         response.headers["Access-Control-Allow-Origin"] = _CORS_ORIGIN
-        response.headers["Access-Control-Allow-Methods"] = "GET, PUT, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     return response
 
@@ -70,6 +70,13 @@ def create_app(config: Config) -> web.Application:
     app["store"] = store
     app["history"] = history
     app["evaluator"] = evaluator
+
+    from service.simulate.runner import SimulationRunner
+    app["simulator"] = SimulationRunner(
+        store=store, history=history, evaluator=evaluator,
+        poll_interval=config.poll_interval,
+    )
+
     app["hub"] = hub
     app["start_time"] = time.monotonic()
 

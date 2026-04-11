@@ -150,6 +150,8 @@ IGRILL_APNS_USE_SANDBOX=true
 | `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
 | `GET` | `/api/sessions/{id}/export` | Export session data as CSV (`?format=csv`) or enriched JSON (`?format=json`, default). CSV columns: `timestamp`, `probe_index`, `label`, `temperature_c`, `battery_pct`, `propane_pct`. |
 | `POST` | `/api/v1/devices/push-token` | Register or update an APNS push token. Body: `{"token": "hex_device_token", "liveActivityToken": "hex_la_token"}`. The `liveActivityToken` field is optional. |
+| `POST` | `/api/v1/simulate/start` | Start a simulated cook session. Body (optional): `{"speed": 10, "probes": 4}`. `speed` is the time multiplier (default 10), `probes` is the number of active probes 1-4 (default 4). Returns `sessionId`, `speed`, and `probes`. Returns 409 if a simulation is already running. Requires authorisation. |
+| `POST` | `/api/v1/simulate/stop` | Stop the running simulation. Returns the `sessionId` and total `readings` count. Returns 400 if no simulation is running. Requires authorisation. |
 | `PUT` | `/api/config/log-levels` | Runtime log level update (requires authorisation). |
 
 ### WebSocket Protocol (v2)
@@ -264,6 +266,9 @@ service/
     session.py           # TargetConfig dataclass for probe target temperatures
   push/
     service.py           # APNS push notification service (alerts and Live Activity updates)
+  simulate/
+    curves.py            # Temperature curve generators (fixed target, range oscillation)
+    runner.py            # Background task that generates simulated iGrill readings
   web/
     dashboard.py         # Dashboard route handler and static file serving
     static/
@@ -283,6 +288,8 @@ tests/
   test_routes.py         # HTTP route handler tests
   test_push_service.py   # Push notification service tests
   test_schema.py         # Database schema tests
+  test_simulate_api.py   # Simulation API endpoint tests
+  test_simulate_curves.py # Temperature curve generator tests
 ```
 
 ## Development
