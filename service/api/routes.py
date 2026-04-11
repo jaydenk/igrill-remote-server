@@ -72,8 +72,9 @@ async def session_detail_handler(request: web.Request) -> web.Response:
     readings = await history.get_session_readings(session_id)
     targets = await history.get_targets(session_id)
     devices = await history.get_session_devices(session_id)
-    name = await history.get_session_name(session_id)
-    notes = await history.get_session_notes(session_id)
+    meta = await history.get_session_metadata(session_id)
+    name = meta["name"] if meta else None
+    notes = meta["notes"] if meta else None
     return web.json_response({
         "sessionId": session_id,
         "name": name,
@@ -93,7 +94,8 @@ async def export_handler(request: web.Request) -> web.Response:
 
     readings = await history.get_session_readings(session_id)
     targets = await history.get_targets(session_id)
-    name = await history.get_session_name(session_id)
+    meta = await history.get_session_metadata(session_id)
+    name = meta["name"] if meta else None
 
     # Build label lookup from targets
     label_by_probe: dict[int, str] = {}
@@ -110,12 +112,10 @@ async def export_handler(request: web.Request) -> web.Response:
             ts = r.get("recorded_at", "")
             battery = r.get("battery")
             propane = r.get("propane")
-            probes = r.get("probes", [])
-            for p in probes:
-                idx = p.get("index", 0)
-                temp = p.get("temperature")
-                label = label_by_probe.get(idx, "")
-                writer.writerow([ts, idx, label, temp, battery, propane])
+            idx = r.get("probe_index", 0)
+            temp = r.get("temperature")
+            label = label_by_probe.get(idx, "")
+            writer.writerow([ts, idx, label, temp, battery, propane])
 
         safe_name = (name or session_id).replace('"', "'")
         return web.Response(
@@ -128,9 +128,8 @@ async def export_handler(request: web.Request) -> web.Response:
 
     # Default: enriched JSON
     for r in readings:
-        for p in r.get("probes", []):
-            idx = p.get("index", 0)
-            p["label"] = label_by_probe.get(idx)
+        idx = r.get("probe_index", 0)
+        r["label"] = label_by_probe.get(idx)
     return web.json_response({
         "sessionId": session_id,
         "name": name,

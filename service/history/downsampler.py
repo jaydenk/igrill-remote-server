@@ -113,62 +113,61 @@ async def downsample_range(
 
     deleted_count = 0
     inserted_count = 0
-
-    # Collect all (session_id, address) pairs that were touched by downsampling
-    # so we can clean up orphaned device_readings afterwards.
     touched_addresses: set[tuple[str, str]] = set()
 
-    for key, readings in buckets.items():
-        if len(readings) <= 1:
-            continue
+    try:
+        await conn.execute("BEGIN")
 
-        address, probe_index, bucket_key = key
+        for key, readings in buckets.items():
+            if len(readings) <= 1:
+                continue
 
-        temps = [r["temperature"] for r in readings if r["temperature"] is not None]
-        avg_temp = sum(temps) / len(temps) if temps else None
+            address, probe_index, bucket_key = key
+            temps = [r["temperature"] for r in readings if r["temperature"] is not None]
+            avg_temp = sum(temps) / len(temps) if temps else None
+            timestamps = [datetime.fromisoformat(r["recorded_at"]) for r in readings]
+            mid_ts = min(timestamps) + (max(timestamps) - min(timestamps)) / 2
+            mid_ts_iso = mid_ts.isoformat()
+            min_seq = min(r["seq"] for r in readings)
+            sid = readings[0]["session_id"]
+            touched_addresses.add((sid, address))
 
-        timestamps = [datetime.fromisoformat(r["recorded_at"]) for r in readings]
-        mid_ts = min(timestamps) + (max(timestamps) - min(timestamps)) / 2
-        mid_ts_iso = mid_ts.isoformat()
+            ids = [r["id"] for r in readings]
+            placeholders = ",".join("?" for _ in ids)
+            await conn.execute(
+                f"DELETE FROM probe_readings WHERE id IN ({placeholders})", ids,
+            )
+            deleted_count += len(ids)
 
-        min_seq = min(r["seq"] for r in readings)
+            await conn.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, address, mid_ts_iso, min_seq, probe_index, avg_temp),
+            )
+            inserted_count += 1
 
-        sid = readings[0]["session_id"]
-        touched_addresses.add((sid, address))
+        for sid_val, addr_val in touched_addresses:
+            await conn.execute(
+                "DELETE FROM device_readings "
+                "WHERE session_id = ? AND address = ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM probe_readings "
+                "  WHERE probe_readings.session_id = device_readings.session_id "
+                "  AND probe_readings.address = device_readings.address "
+                "  AND probe_readings.seq = device_readings.seq"
+                ")",
+                (sid_val, addr_val),
+            )
 
-        ids = [r["id"] for r in readings]
-        placeholders = ",".join("?" for _ in ids)
-        await conn.execute(
-            f"DELETE FROM probe_readings WHERE id IN ({placeholders})",
-            ids,
+        await conn.commit()
+    except Exception:
+        await conn.execute("ROLLBACK")
+        LOG.error(
+            "Downsampling FAILED for session %s [%s] — rolled back",
+            session_id, label,
         )
-        deleted_count += len(ids)
-
-        await conn.execute(
-            "INSERT INTO probe_readings "
-            "(session_id, address, recorded_at, seq, probe_index, temperature) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (sid, address, mid_ts_iso, min_seq, probe_index, avg_temp),
-        )
-        inserted_count += 1
-
-    # Remove orphaned device_readings rows — only delete when NO probe_readings
-    # row still references that seq.  This is safe for multi-probe devices where
-    # different probes may preserve different seq values.
-    for sid_val, addr_val in touched_addresses:
-        await conn.execute(
-            "DELETE FROM device_readings "
-            "WHERE session_id = ? AND address = ? "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM probe_readings "
-            "  WHERE probe_readings.session_id = device_readings.session_id "
-            "  AND probe_readings.address = device_readings.address "
-            "  AND probe_readings.seq = device_readings.seq"
-            ")",
-            (sid_val, addr_val),
-        )
-
-    await conn.commit()
+        raise
 
     if deleted_count > 0 or inserted_count > 0:
         LOG.info(

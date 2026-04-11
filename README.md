@@ -102,6 +102,7 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 | `GET` | `/health` | Health check with uptime, device counts, active session ID, poll interval, and scan interval. |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
 | `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
+| `GET` | `/api/sessions/{id}/export` | Export session data as CSV (`?format=csv`) or enriched JSON (`?format=json`, default). CSV columns: `timestamp`, `probe_index`, `label`, `temperature_c`, `battery_pct`, `propane_pct`. |
 | `PUT` | `/api/config/log-levels` | Runtime log level update (requires authorisation). |
 
 ### WebSocket Protocol (v2)
@@ -117,7 +118,7 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | Type | Description |
 | --- | --- |
 | `status_request` | Returns device state, session info, sample rate, active targets, and session devices. |
-| `sessions_request` | Lists recent sessions (`payload.limit` defaults to 20, max 100). |
+| `sessions_request` | Lists recent sessions (`payload.limit` defaults to 20, max 100; `payload.offset` defaults to 0). |
 | `history_request` | Streams history chunks (`sinceTs`, `untilTs`, `limit` (max 10,000), `sessionId`, `chunkSize`). |
 | `session_start_request` | Starts a new user-initiated session. Accepts optional `name` (string), `targets` array, and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
 | `session_end_request` | Ends the current session. Requires authorisation. |
@@ -175,11 +176,11 @@ A single session can include multiple iGrill devices. Devices can be added to an
 
 ### Normalised Data Layer
 
-Session data is stored in a normalised SQLite schema: sessions, session-device membership, per-probe readings, and per-device targets are all separate tables linked by foreign keys with UUID session identifiers. Schema changes are applied automatically via a sequential migration runner on startup.
+Session data is stored in a normalised SQLite schema: sessions, session-device membership, per-probe readings, and per-device targets are all separate tables linked by foreign keys with UUID session identifiers. Schema changes are applied automatically via a sequential migration runner on startup — each migration runs inside an explicit transaction and is fully rolled back if any statement fails. Duplicate readings (same session, address, and sequence number) are silently ignored to prevent data loss on worker respawn.
 
 ### Post-Session Downsampling
 
-When a session ends, the raw readings are downsampled to reduce storage. Both probe readings and device readings (battery, propane, heating) are cleaned up together so that historical queries remain consistent. This preserves the overall shape of the temperature curve while significantly reducing database size for long cooks.
+When a session ends, the raw readings are downsampled to reduce storage. Both probe readings and device readings (battery, propane, heating) are cleaned up together so that historical queries remain consistent. The entire downsampling pass runs inside a transaction — if anything fails, the original readings are preserved via rollback. This preserves the overall shape of the temperature curve while significantly reducing database size for long cooks.
 
 ### Device Manager Health Monitoring
 

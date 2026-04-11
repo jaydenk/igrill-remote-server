@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import warnings
 from typing import Any, Dict, List, Optional
 
 from bleak import BleakClient
@@ -121,18 +120,6 @@ class DeviceWorker:
                 ) as client:
                     self._connected_logged = False
                     services = client.services
-                    if services is None:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", category=FutureWarning)
-                            services = await client.get_services()
-                    if services is None:
-                        LOG.warning("No services discovered for %s", self.address)
-                        await self.store.upsert(self.address, connected=False, error="services_unavailable")
-                        self._state_machine.transition(ConnectionState.DISCONNECTED)
-                        self._state_machine.transition(ConnectionState.BACKOFF)
-                        await self._publish_state_change_event()
-                        await asyncio.sleep(self._state_machine.backoff_seconds)
-                        continue
                     self._model = detect_model(services)
                     await self._update_model_state()
 
@@ -173,7 +160,7 @@ class DeviceWorker:
                         if await self.history.is_device_in_session(self.address):
                             await self.history.device_left_session(session_id, self.address)
                     except Exception:
-                        LOG.debug("Failed to mark device %s as left on error", self.address)
+                        LOG.warning("Failed to mark device %s as left — session_devices.left_at may be stale", self.address)
 
                 await self._handle_disconnect()
 
@@ -305,7 +292,9 @@ class DeviceWorker:
 
         # Separate counter for WebSocket broadcasts (always increments,
         # independent of DB seq which only advances during sessions).
-        ws_seq = self._seq
+        # Seeded from monotonic clock to avoid duplicate seq values
+        # across worker respawns.
+        ws_seq = int(asyncio.get_event_loop().time() * 1000)
 
         while client.is_connected and not self._stop.is_set():
             payload = await self._read_metrics(client, services, probe_uuids)
@@ -350,17 +339,18 @@ class DeviceWorker:
             # Only record to DB and evaluate alerts when a session is active
             # and this device is part of it
             if session_id is not None and await self.history.is_device_in_session(self.address):
-                self._seq += 1
+                next_seq = self._seq + 1
                 probes: List[Dict[str, Any]] = payload.get("probes", [])  # type: ignore[assignment]
                 await self.history.record_reading(
                     session_id=session_id,
                     address=self.address,
-                    seq=self._seq,
+                    seq=next_seq,
                     probes=probes,
                     battery=payload.get("battery_percent"),  # type: ignore[arg-type]
                     propane=payload.get("propane_percent"),  # type: ignore[arg-type]
                     heating=payload.get("pulse"),  # type: ignore[arg-type]
                 )
+                self._seq = next_seq
 
                 # Evaluate alert targets and publish any resulting events
                 if probes:

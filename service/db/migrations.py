@@ -38,9 +38,9 @@ async def get_current_version(conn: aiosqlite.Connection) -> int:
 async def run_migrations(conn: aiosqlite.Connection) -> None:
     """Apply any pending migrations in order.
 
-    Each migration is a list of SQL statements executed sequentially.
-    The version is recorded in ``schema_version`` after all statements
-    for that version succeed.
+    Each migration is a list of SQL statements executed inside a single
+    transaction.  If any statement fails the entire migration is rolled
+    back and the error is re-raised.
     """
     current = await get_current_version(conn)
 
@@ -48,11 +48,17 @@ async def run_migrations(conn: aiosqlite.Connection) -> None:
         if version <= current:
             continue
         LOG.info("Applying schema migration v%d", version)
-        for statement in MIGRATIONS[version]:
-            await conn.execute(statement)
-        await conn.execute(
-            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
-            (version,),
-        )
-        await conn.commit()
+        try:
+            await conn.execute("BEGIN")
+            for statement in MIGRATIONS[version]:
+                await conn.execute(statement)
+            await conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                (version,),
+            )
+            await conn.commit()
+        except Exception:
+            await conn.execute("ROLLBACK")
+            LOG.error("Schema migration v%d FAILED — rolled back", version)
+            raise
         LOG.info("Schema migration v%d applied successfully", version)

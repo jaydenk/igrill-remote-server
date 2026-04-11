@@ -23,6 +23,7 @@ import aiosqlite
 
 from service.db.migrations import run_migrations
 from service.db.schema import init_db
+from service.history.downsampler import downsample_session, downsample_range
 from service.models.session import TargetConfig
 
 LOG = logging.getLogger("igrill.session")
@@ -194,7 +195,6 @@ class HistoryStore:
         if result is not None:
             session_id = result["sessionId"]
             try:
-                from service.history.downsampler import downsample_session
                 await downsample_session(self, session_id)
             except Exception:
                 LOG.exception("Downsampling failed for session %s", session_id)
@@ -291,23 +291,16 @@ class HistoryStore:
             row = await cursor.fetchone()
             return {"name": row["name"], "notes": row["notes"]}
 
-    async def get_session_name(self, session_id: str) -> Optional[str]:
-        """Return the name of a session, or ``None`` if not found."""
+    async def get_session_metadata(self, session_id: str) -> Optional[dict]:
+        """Return name and notes for a session, or None if not found."""
         async with self._lock:
             cursor = await self._conn.execute(
-                "SELECT name FROM sessions WHERE id = ?", (session_id,)
+                "SELECT name, notes FROM sessions WHERE id = ?", (session_id,)
             )
             row = await cursor.fetchone()
-            return row["name"] if row else None
-
-    async def get_session_notes(self, session_id: str) -> Optional[str]:
-        """Return the notes of a session, or ``None`` if not found."""
-        async with self._lock:
-            cursor = await self._conn.execute(
-                "SELECT notes FROM sessions WHERE id = ?", (session_id,)
-            )
-            row = await cursor.fetchone()
-            return row["notes"] if row else None
+            if row is None:
+                return None
+            return {"name": row["name"], "notes": row["notes"]}
 
     # ------------------------------------------------------------------
     # Multi-device management within sessions
@@ -469,7 +462,7 @@ class HistoryStore:
             heating_json = json.dumps(heating) if heating is not None else None
 
             await self._conn.execute(
-                "INSERT OR REPLACE INTO device_readings "
+                "INSERT OR IGNORE INTO device_readings "
                 "(session_id, address, recorded_at, seq, battery, propane, heating_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (session_id, address, ts, seq, battery, propane, heating_json),
@@ -477,7 +470,7 @@ class HistoryStore:
 
             for probe in probes:
                 await self._conn.execute(
-                    "INSERT OR REPLACE INTO probe_readings "
+                    "INSERT OR IGNORE INTO probe_readings "
                     "(session_id, address, recorded_at, seq, probe_index, temperature) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (
@@ -815,8 +808,6 @@ class HistoryStore:
         Called by ``service.history.downsampler`` — provides controlled access
         to the database connection without exposing private attributes.
         """
-        from service.history.downsampler import downsample_range
-
         async with self._lock:
             await downsample_range(
                 self._conn, session_id,

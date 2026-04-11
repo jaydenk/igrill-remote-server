@@ -317,3 +317,94 @@ async def test_list_sessions_includes_name_notes(store, sample_address):
     sessions = await store.list_sessions(limit=5)
     assert sessions[0]["name"] == "Cook 1"
     assert sessions[0]["notes"] == "Tasty"
+
+
+@pytest.mark.asyncio
+async def test_recover_orphaned_sessions(tmp_db, sample_address):
+    """Orphaned sessions (no ended_at) should be closed on recovery.
+
+    Simulates a server restart by creating a session with one store
+    instance, closing it without ending the session, then opening a
+    fresh store (as startup would) and running recovery.
+    """
+    # Start a session then "crash" (close store without ending session)
+    store1 = HistoryStore(tmp_db, reconnect_grace=60)
+    await store1.connect()
+    start = await store1.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store1.close()
+
+    # "Restart" — new store instance, run recovery
+    store2 = HistoryStore(tmp_db, reconnect_grace=60)
+    await store2.connect()
+    await store2.recover_orphaned_sessions()
+
+    state = await store2.get_session_state()
+    assert state["current_session_id"] is None
+
+    sessions = await store2.list_sessions(limit=10)
+    assert len(sessions) == 1
+    assert sessions[0]["endReason"] == "server_restart"
+    await store2.close()
+
+
+@pytest.mark.asyncio
+async def test_get_history_items_with_time_filter(store, sample_address):
+    """get_history_items should filter by since_ts and until_ts."""
+    from datetime import datetime, timezone, timedelta
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    base = datetime.now(timezone.utc) - timedelta(hours=2)
+    for i in range(3):
+        ts = (base + timedelta(minutes=i * 30)).isoformat()
+        await store.record_reading(
+            session_id=sid, address=sample_address, seq=i + 1,
+            probes=[{"index": 1, "temperature": 70.0 + i}],
+            battery=85, propane=None, heating=None, recorded_at=ts,
+        )
+
+    # Filter: only readings after the first
+    since = (base + timedelta(minutes=15)).isoformat()
+    items = await store.get_history_items(since_ts=since, session_id=sid)
+    assert len(items) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_history_items_with_limit(store, sample_address):
+    """get_history_items should respect the limit parameter."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    for i in range(5):
+        await store.record_reading(
+            session_id=sid, address=sample_address, seq=i + 1,
+            probes=[{"index": 1, "temperature": 70.0 + i}],
+            battery=85, propane=None, heating=None,
+        )
+
+    items = await store.get_history_items(session_id=sid, limit=3)
+    assert len(items) == 3
+
+
+@pytest.mark.asyncio
+async def test_duplicate_seq_preserves_original(store, sample_address):
+    """INSERT OR IGNORE should keep the first reading, not overwrite."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.record_reading(
+        session_id=sid, address=sample_address, seq=1,
+        probes=[{"index": 1, "temperature": 72.5}],
+        battery=85, propane=None, heating=None,
+    )
+    await store.record_reading(
+        session_id=sid, address=sample_address, seq=1,
+        probes=[{"index": 1, "temperature": 99.9}],
+        battery=50, propane=None, heating=None,
+    )
+
+    items = await store.get_session_readings(sid)
+    assert len(items) == 1
+    assert items[0]["temperature"] == 72.5
+    assert items[0]["battery"] == 85

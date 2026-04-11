@@ -25,8 +25,8 @@ class TargetConfig:
     target_value: Optional[float] = None
     range_low: Optional[float] = None
     range_high: Optional[float] = None
-    pre_alert_offset: float = 10.0
-    reminder_interval_secs: int = 300
+    pre_alert_offset: float = 5.0
+    reminder_interval_secs: int = 0
     label: Optional[str] = None
 
     def effective_target(self) -> Optional[float]:
@@ -61,11 +61,11 @@ class TargetConfig:
         if not 1 <= probe_index <= 4:
             raise ValueError(f"probe_index must be 1-4, got {probe_index}")
 
-        pre_alert_offset = float(data.get("pre_alert_offset", 10.0))
+        pre_alert_offset = float(data.get("pre_alert_offset", 5.0))
         if pre_alert_offset < 0:
             raise ValueError(f"pre_alert_offset must be >= 0, got {pre_alert_offset}")
 
-        reminder_interval_secs = int(data.get("reminder_interval_secs", 300))
+        reminder_interval_secs = int(data.get("reminder_interval_secs", 0))
         if reminder_interval_secs < 0:
             raise ValueError(f"reminder_interval_secs must be >= 0, got {reminder_interval_secs}")
 

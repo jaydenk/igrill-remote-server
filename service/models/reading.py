@@ -83,8 +83,6 @@ def build_reading_payload(
         "name": device_entry.get("name"),
         "model": device_entry.get("model"),
         "model_name": device_entry.get("model_name"),
-        "session_id": session_id,
-        "session_start_ts": session_start_ts,
         "last_update": device_entry.get("last_update"),
         "unit": device_entry.get("unit"),
         "battery_percent": device_entry.get("battery_percent"),

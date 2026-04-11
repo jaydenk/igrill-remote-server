@@ -101,64 +101,21 @@ class WebSocketClient:
 
     async def _sender(self) -> None:
         while True:
-            # Prioritise critical events over readings
+            # Always drain events first (priority); fall back to readings.
             try:
                 message = self._event_queue.get_nowait()
             except asyncio.QueueEmpty:
-                # No critical event — wait for either queue
-                reading_wait = asyncio.create_task(self._reading_queue.get())
-                event_wait = asyncio.create_task(self._event_queue.get())
                 try:
-                    done, pending = await asyncio.wait(
-                        {reading_wait, event_wait},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for p in pending:
-                        p.cancel()
-                        # If the pending task already completed before cancel,
-                        # re-enqueue its result so it isn't lost.
-                        if not p.cancelled():
-                            try:
-                                leftover = p.result()
-                                target = (
-                                    self._event_queue
-                                    if p is event_wait
-                                    else self._reading_queue
-                                )
-                                try:
-                                    target.put_nowait(leftover)
-                                except asyncio.QueueFull:
-                                    pass
-                            except (asyncio.CancelledError, asyncio.InvalidStateError):
-                                pass
-                    # When both tasks complete simultaneously, prioritise
-                    # events and re-enqueue the other result.
-                    if len(done) > 1:
-                        event_result = None
-                        reading_result = None
-                        for d in done:
-                            if d is event_wait:
-                                event_result = d.result()
-                            else:
-                                reading_result = d.result()
-                        message = event_result if event_result is not None else reading_result
-                        leftover_msg = reading_result if event_result is not None else event_result
-                        if leftover_msg is not None:
-                            target = (
-                                self._reading_queue
-                                if event_result is not None
-                                else self._event_queue
-                            )
-                            try:
-                                target.put_nowait(leftover_msg)
-                            except asyncio.QueueFull:
-                                pass
-                    else:
-                        message = done.pop().result()
-                except asyncio.CancelledError:
-                    reading_wait.cancel()
-                    event_wait.cancel()
-                    raise
+                    message = self._reading_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    # Both empty — wait on event queue with a short timeout,
+                    # then loop to check reading queue.
+                    try:
+                        message = await asyncio.wait_for(
+                            self._event_queue.get(), timeout=0.1,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
 
             if self.ws.closed:
                 break
@@ -174,7 +131,12 @@ class WebSocketClient:
         if critical:
             if self._event_queue.full():
                 try:
-                    self._event_queue.get_nowait()
+                    evicted = self._event_queue.get_nowait()
+                    LOG.warning(
+                        "Event queue full — evicted message type=%s to enqueue type=%s",
+                        evicted.get("type", "unknown"),
+                        message.get("type", "unknown"),
+                    )
                 except asyncio.QueueEmpty:
                     pass
             self._event_queue.put_nowait(message)
@@ -215,7 +177,7 @@ class WebSocketHub:
         for client in list(self.clients):
             if client.ws.closed:
                 self.clients.discard(client)
-                asyncio.ensure_future(client.close())
+                asyncio.create_task(client.close())
                 continue
             client.enqueue(message, critical=critical)
 
@@ -307,7 +269,8 @@ async def _handle_status(ctx: _MessageContext) -> None:
         "sessionDevices": session_devices,
     }
     if current_sid is not None:
-        status_payload["currentSessionName"] = await ctx.history.get_session_name(current_sid)
+        meta = await ctx.history.get_session_metadata(current_sid)
+        status_payload["currentSessionName"] = meta["name"] if meta else None
     LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
              ctx.peer, device_state, has_data, session_state.get("current_session_id"))
     await send_envelope(ctx.ws, "status", status_payload, request_id=ctx.request_id)
@@ -329,7 +292,16 @@ async def _handle_sessions(ctx: _MessageContext) -> None:
     if limit > 100:
         limit = 100
 
-    sessions = await ctx.history.list_sessions(limit)
+    offset = ctx.payload.get("offset", 0)
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        await send_error(ctx.ws, "invalid_payload", "offset must be an integer.", ctx.request_id)
+        return
+    if offset < 0:
+        offset = 0
+
+    sessions = await ctx.history.list_sessions(limit, offset=offset)
     await send_envelope(ctx.ws, "sessions", {"sessions": sessions}, request_id=ctx.request_id)
 
 

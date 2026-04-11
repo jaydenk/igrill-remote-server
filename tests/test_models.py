@@ -194,8 +194,8 @@ class TestTargetConfig:
         """Omitted optional fields should receive sensible defaults."""
         tc = TargetConfig.from_dict({"probe_index": 1})
         assert tc.mode == "fixed"
-        assert tc.pre_alert_offset == 10.0
-        assert tc.reminder_interval_secs == 300
+        assert tc.pre_alert_offset == 5.0
+        assert tc.reminder_interval_secs == 0
         assert tc.target_value is None
         assert tc.range_low is None
         assert tc.range_high is None
@@ -231,6 +231,12 @@ class TestTargetConfig:
         data = {"probe_index": 1, "mode": "fixed", "target_value": 93.0}
         tc = TargetConfig.from_dict(data)
         assert tc.label is None
+
+    def test_target_config_defaults_match_schema(self):
+        """TargetConfig defaults must match the DB schema defaults."""
+        t = TargetConfig(probe_index=1, mode="fixed")
+        assert t.pre_alert_offset == 5.0
+        assert t.reminder_interval_secs == 0
 
 
 # -----------------------------------------------------------------------

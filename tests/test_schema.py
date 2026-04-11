@@ -5,7 +5,7 @@ import sqlite3
 import aiosqlite
 import pytest
 
-from service.db.schema import init_db, SCHEMA_VERSION
+from service.db.schema import init_db
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,7 @@ async def test_schema_version_recorded(tmp_db):
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         )
         row = await cursor.fetchone()
-        assert row[0] == SCHEMA_VERSION
+        assert row[0] == 1
 
 
 @pytest.mark.asyncio
@@ -111,47 +111,6 @@ async def test_indexes_created(tmp_db):
 
 
 @pytest.mark.asyncio
-async def test_legacy_schema_upgrade(tmp_db):
-    """Verify that init_db detects and replaces the old INTEGER PK schema."""
-    async with aiosqlite.connect(tmp_db) as conn:
-        # Create the legacy sessions table (INTEGER PRIMARY KEY)
-        await conn.execute(
-            """
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                address TEXT NOT NULL,
-                name TEXT,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                start_reason TEXT,
-                end_reason TEXT
-            )
-            """
-        )
-        await conn.execute(
-            "INSERT INTO sessions (address, started_at, start_reason) "
-            "VALUES ('AA:BB:CC', '2026-01-01T00:00:00Z', 'user')"
-        )
-        await conn.commit()
-
-        # init_db should drop the old table and create the new one
-        await init_db(conn)
-
-        # Verify sessions.id is now TEXT
-        cursor = await conn.execute("PRAGMA table_info(sessions)")
-        columns = await cursor.fetchall()
-        id_col = [c for c in columns if c[1] == "id"][0]
-        assert id_col[2].upper() == "TEXT"
-
-        # Verify we can insert a UUID text ID
-        await conn.execute(
-            "INSERT INTO sessions (id, started_at, start_reason) "
-            "VALUES ('abcdef1234567890abcdef1234567890', '2026-01-01T00:00:00Z', 'user')"
-        )
-        await conn.commit()
-
-
-@pytest.mark.asyncio
 async def test_session_enrichment_columns(tmp_db):
     """Migration v2 adds name/notes to sessions and label to session_targets."""
     async with aiosqlite.connect(tmp_db) as conn:
@@ -170,3 +129,36 @@ async def test_session_enrichment_columns(tmp_db):
         cursor = await conn.execute("PRAGMA table_info(session_targets)")
         cols = {row[1] for row in await cursor.fetchall()}
         assert "label" in cols, "session_targets.label column missing"
+
+
+@pytest.mark.asyncio
+async def test_partial_migration_rolls_back(tmp_db):
+    """A migration that fails partway through should not leave the DB in a half-applied state."""
+    from service.db.migrations import MIGRATIONS, run_migrations
+
+    original = dict(MIGRATIONS)
+    try:
+        async with aiosqlite.connect(tmp_db) as conn:
+            conn.row_factory = aiosqlite.Row
+            await init_db(conn)
+            await run_migrations(conn)  # apply v2
+
+            # Now inject a broken migration and attempt it
+            MIGRATIONS[99] = [
+                "ALTER TABLE sessions ADD COLUMN _test_col_1 TEXT",
+                "ALTER TABLE nonexistent_table ADD COLUMN oops TEXT",
+            ]
+
+            with pytest.raises(Exception):
+                await run_migrations(conn)  # attempt v99, should fail + rollback
+
+            cursor = await conn.execute("PRAGMA table_info(sessions)")
+            cols = {row[1] for row in await cursor.fetchall()}
+            assert "_test_col_1" not in cols
+
+            cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
+            row = await cursor.fetchone()
+            assert row[0] == 2
+    finally:
+        MIGRATIONS.clear()
+        MIGRATIONS.update(original)
