@@ -21,12 +21,12 @@ SIM_NAME = "Simulated iGrill V2"
 SIM_MODEL = "igrill_v2"
 SIM_MODEL_NAME = "iGrill V2"
 
-# Probe configurations: (label, mode, target_value, range_low, range_high, k, noise)
+# (label, mode, target_value, range_low, range_high, k, noise, start_delay_ticks)
 _PROBE_CONFIGS = [
-    ("Brisket", "fixed", 90.0, None, None, 0.015, 1.5),
-    ("Ribs", "fixed", 80.0, None, None, 0.020, 1.5),
-    ("BBQ Temp", "range", None, 110.0, 130.0, None, 5.0),
-    ("Pork Belly", "fixed", 75.0, None, None, 0.010, 1.0),
+    ("Brisket", "fixed", 90.0, None, None, 0.015, 1.5, 30),
+    ("Ribs", "fixed", 80.0, None, None, 0.020, 1.5, 30),
+    ("BBQ Temp", "range", None, 110.0, 130.0, None, 5.0, 0),
+    ("Pork Belly", "fixed", 75.0, None, None, 0.010, 1.0, 25),
 ]
 
 
@@ -143,7 +143,7 @@ class SimulationRunner:
     def _build_targets(self, probe_count: int) -> list[TargetConfig]:
         targets = []
         for i in range(probe_count):
-            label, mode, target_val, r_low, r_high, _, _ = _PROBE_CONFIGS[i]
+            label, mode, target_val, r_low, r_high, _, _, _ = _PROBE_CONFIGS[i]
             targets.append(TargetConfig(
                 probe_index=i + 1,
                 mode=mode,
@@ -239,15 +239,27 @@ class SimulationRunner:
                 })
                 continue
 
-            label, mode, target_val, r_low, r_high, k, noise_amp = _PROBE_CONFIGS[i]
+            label, mode, target_val, r_low, r_high, k, noise_amp, start_delay = _PROBE_CONFIGS[i]
+
+            # Probe hasn't been "plugged in" yet
+            if tick < start_delay:
+                probes.append({
+                    "index": i + 1,
+                    "temperature": None,
+                    "raw": 63536,
+                    "unplugged": True,
+                })
+                continue
+
+            effective_tick = tick - start_delay
 
             if mode == "fixed":
                 temp = fixed_probe_temp(
-                    tick=tick, target=target_val, start=25.0, k=k, noise=noise_amp,
+                    tick=effective_tick, target=target_val, start=25.0, k=k, noise=noise_amp,
                 )
             else:
                 temp = range_probe_temp(
-                    tick=tick,
+                    tick=effective_tick,
                     range_low=r_low,
                     range_high=r_high,
                     start=25.0,
