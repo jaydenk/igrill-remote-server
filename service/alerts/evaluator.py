@@ -15,6 +15,7 @@ class ProbeAlertState:
     """Tracks which alert stages have already been dispatched for a probe."""
 
     approaching_sent: bool = False
+    approaching_high_sent: bool = False
     reached_sent: bool = False
     exceeded_sent: bool = False
     last_reminder_ts: float = 0.0
@@ -100,10 +101,21 @@ class AlertEvaluator:
                 reached = low <= temp <= effective_target
                 exceeded = temp > effective_target
                 approaching = temp >= (low - target.pre_alert_offset) and temp < low
+                approaching_high = (
+                    temp > (effective_target - target.pre_alert_offset)
+                    and temp <= effective_target
+                    and not exceeded
+                )
 
             if approaching and not state.approaching_sent:
                 state.approaching_sent = True
                 events.append({"type": "target_approaching", "payload": base_payload})
+
+            if target.mode == "range" and approaching_high and not state.approaching_high_sent:
+                state.approaching_high_sent = True
+                events.append({"type": "target_approaching", "payload": {
+                    **base_payload, "subtype": "high"
+                }})
 
             if reached and not state.reached_sent:
                 state.reached_sent = True

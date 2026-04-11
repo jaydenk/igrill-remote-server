@@ -195,7 +195,7 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | `reading` | Pushed on each poll cycle with latest probe data (always broadcast, regardless of session state). |
 | `session_start` / `session_end` | Broadcast when sessions change. |
 | `device_joined` | Broadcast when a device is added to an active session. |
-| `target_approaching` | Probe temperature crossed the pre-alert threshold. |
+| `target_approaching` | Probe temperature crossed the pre-alert threshold. In range mode, may include `"subtype": "high"` when approaching the upper bound. |
 | `target_reached` | Probe temperature hit the target. |
 | `target_exceeded` | Probe temperature went above the target. |
 | `target_reminder` | Periodic nudge while temperature remains above target. |
@@ -275,6 +275,7 @@ service/
       index.html         # Tab-based monitoring dashboard with live view (session name, probe labels), session history with names, notes, and full-timeline charts and summary statistics, settings with device info and runtime log level controls (vanilla HTML/CSS/JS, uPlot)
 tests/
   conftest.py            # Shared pytest fixtures
+  test_alert_evaluator.py # AlertEvaluator unit tests (range approaching-high, reached, exceeded)
   test_alerts.py         # AlertEvaluator tests
   test_config.py         # Configuration module tests
   test_config_new.py     # Extended configuration tests
