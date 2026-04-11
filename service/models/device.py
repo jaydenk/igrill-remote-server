@@ -1,6 +1,7 @@
 """In-memory device state store with async-safe access and message queues."""
 
 import asyncio
+import copy
 from typing import Dict, Optional
 
 
@@ -67,9 +68,9 @@ class DeviceStore:
             entry.update(fields)
 
     async def snapshot(self) -> Dict[str, Dict[str, object]]:
-        """Return a shallow copy of every device entry, keyed by address."""
+        """Return a deep copy of every device entry, keyed by address."""
         async with self._lock:
-            return {key: dict(value) for key, value in self._devices.items()}
+            return {key: copy.deepcopy(value) for key, value in self._devices.items()}
 
     async def get_device(self, address: str) -> Optional[Dict[str, object]]:
         """Return a copy of a single device entry, or ``None``."""

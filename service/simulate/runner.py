@@ -270,7 +270,7 @@ class SimulationRunner:
             probes.append({
                 "index": i + 1,
                 "temperature": temp,
-                "raw": int(temp),
+                "raw": round(temp),
                 "unplugged": False,
             })
 

@@ -423,6 +423,8 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         return
 
     name = ctx.payload.get("name")
+    if name is not None:
+        name = str(name)[:200]  # Truncate to prevent abuse
     session_info = await ctx.history.start_session(
         addresses=device_addresses, reason="user", name=name
     )
@@ -610,6 +612,8 @@ async def _handle_session_update(ctx: _MessageContext) -> None:
         return
 
     name = ctx.payload.get("name")
+    if name is not None:
+        name = str(name)[:200]  # Truncate to prevent abuse
     notes = ctx.payload.get("notes")
 
     result = await ctx.history.update_session(session_id, name=name, notes=notes)
