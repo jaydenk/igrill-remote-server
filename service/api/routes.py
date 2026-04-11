@@ -156,6 +156,22 @@ async def push_token_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def push_test_handler(request: web.Request) -> web.Response:
+    """POST /api/v1/push/test — send a test push to all registered tokens."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    push_service = request.app.get("push_service")
+    if not push_service:
+        return web.json_response({"error": "push service not available"}, status=503)
+
+    result = await push_service.send_test()
+    if "error" in result:
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
 async def log_levels_handler(request: web.Request) -> web.Response:
     """PUT /api/config/log-levels — runtime log level update."""
     from service.api.websocket import is_authorized
@@ -192,4 +208,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/sessions/{id}", session_detail_handler)
     app.router.add_get("/api/sessions/{id}/export", export_handler)
     app.router.add_post("/api/v1/devices/push-token", push_token_handler)
+    app.router.add_post("/api/v1/push/test", push_test_handler)
     app.router.add_put("/api/config/log-levels", log_levels_handler)

@@ -334,3 +334,55 @@ class PushService:
             (la_token,),
         )
         await self._db.commit()
+
+    # ------------------------------------------------------------------
+    # Test push
+    # ------------------------------------------------------------------
+
+    async def send_test(self) -> dict[str, Any]:
+        """Send a test push notification to all registered tokens.
+
+        Returns a summary of delivery results per token.
+        """
+        if not self._enabled or self._client is None:
+            return {"error": "push notifications not configured"}
+
+        tokens = await self._get_all_tokens()
+        if not tokens:
+            return {"error": "no push tokens registered"}
+
+        from aioapns import NotificationRequest, PushType
+
+        results: list[dict[str, Any]] = []
+        for token in tokens:
+            request = NotificationRequest(
+                device_token=token,
+                message={
+                    "aps": {
+                        "alert": {
+                            "title": "iGrill Remote — Test",
+                            "body": "Push notifications are working.",
+                        },
+                        "sound": "default",
+                    },
+                },
+                notification_id=str(uuid4()),
+                push_type=PushType.ALERT,
+            )
+            try:
+                result = await self._client.send_notification(request)
+                results.append({
+                    "token": f"{token[:8]}…",
+                    "success": result.is_successful,
+                    "description": result.description if not result.is_successful else None,
+                })
+                if not result.is_successful and result.description in _INVALID_TOKEN_REASONS:
+                    await self.remove_token(token)
+            except Exception as exc:
+                results.append({
+                    "token": f"{token[:8]}…",
+                    "success": False,
+                    "description": str(exc),
+                })
+
+        return {"sent": len(results), "results": results}
