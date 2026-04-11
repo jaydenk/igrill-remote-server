@@ -16,6 +16,7 @@ from service.ble.device_manager import DeviceManager
 from service.alerts.evaluator import AlertEvaluator
 from service.api.routes import setup_routes
 from service.api.websocket import WebSocketHub, broadcast_readings, broadcast_events
+from service.push.service import PushService
 from service.web.dashboard import setup_dashboard
 
 LOG = logging.getLogger("igrill")
@@ -96,6 +97,18 @@ async def run() -> None:
     history: HistoryStore = app["history"]
     await history.connect()
     await history.recover_orphaned_sessions()
+
+    # Create and connect the push service (shares the history DB connection)
+    push_service = PushService(
+        db=history._conn,
+        key_path=config.apns_key_path,
+        key_id=config.apns_key_id,
+        team_id=config.apns_team_id,
+        bundle_id=config.apns_bundle_id,
+        use_sandbox=config.apns_use_sandbox,
+    )
+    app["push_service"] = push_service
+    await push_service.connect()
 
     runner = web.AppRunner(app)
     await runner.setup()

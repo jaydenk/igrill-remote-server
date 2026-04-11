@@ -747,9 +747,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 async def broadcast_readings(app: web.Application) -> None:
-    """Forward device readings from the store to all connected WebSocket clients."""
+    """Forward queued readings to all WebSocket clients."""
     store: DeviceStore = app["store"]
     hub: WebSocketHub = app["hub"]
+    push_service = app.get("push_service")
+
     while True:
         reading = await store.next_reading()
         message = make_envelope("reading", reading["payload"], seq=reading.get("seq"))
@@ -758,11 +760,28 @@ async def broadcast_readings(app: web.Application) -> None:
             LOG.debug("Broadcasting reading to %d client(s) seq=%s", client_count, reading.get("seq"))
         hub.broadcast(message, critical=False)
 
+        # Throttled Live Activity push update
+        if push_service and push_service.should_send_la_update():
+            try:
+                await push_service.send_live_activity_update(reading)
+            except Exception:
+                LOG.exception("Failed to send Live Activity update")
+
 
 async def broadcast_events(app: web.Application) -> None:
-    """Forward device events from the store to all connected WebSocket clients."""
+    """Forward queued events to all WebSocket clients and push service."""
     store: DeviceStore = app["store"]
     hub: WebSocketHub = app["hub"]
+    push_service = app.get("push_service")
+    alert_types = {"target_approaching", "target_reached", "target_exceeded", "target_reminder"}
+
     while True:
         event = await store.next_event()
         hub.broadcast(event, critical=True)
+
+        # Send push notification for alert events
+        if push_service and event.get("type") in alert_types:
+            try:
+                await push_service.send_alert(event)
+            except Exception:
+                LOG.exception("Failed to send push for event %s", event.get("type"))
