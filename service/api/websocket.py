@@ -503,6 +503,49 @@ async def _handle_session_end(ctx: _MessageContext) -> None:
     )
 
 
+async def _handle_session_discard(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to discard sessions",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    deleted = await ctx.history.discard_session(current_sid)
+    if not deleted:
+        await send_error(
+            ctx.ws, "session_not_found",
+            f"Session {current_sid} does not exist.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    ctx.evaluator.clear_session(current_sid)
+
+    # Stop simulation if a simulated session was in progress.
+    if ctx.simulator and ctx.simulator.is_running:
+        await ctx.simulator.stop()
+
+    await ctx.store.publish_event(
+        make_envelope("session_discarded", {"sessionId": current_sid})
+    )
+
+    await send_envelope(
+        ctx.ws, "session_discard_ack",
+        {"ok": True, "sessionId": current_sid},
+        request_id=ctx.request_id,
+    )
+
+
 async def _handle_target_update(ctx: _MessageContext) -> None:
     if not ctx.authorized:
         await send_error(
@@ -647,6 +690,7 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "history_request": _handle_history,
     "session_start_request": _handle_session_start,
     "session_end_request": _handle_session_end,
+    "session_discard_request": _handle_session_discard,
     "session_update_request": _handle_session_update,
     "target_update_request": _handle_target_update,
     "session_add_device_request": _handle_session_add_device,
