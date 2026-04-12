@@ -787,6 +787,10 @@ class HistoryStore:
         is replaced — mode and duration_secs are updated and all other
         fields reset to their initial (paused, un-started) state.
         """
+        if mode not in ("count_up", "count_down"):
+            raise ValueError(
+                f"mode must be 'count_up' or 'count_down', got {mode!r}"
+            )
         async with self._lock:
             self._require_active_session_locked(session_id)
 
@@ -823,6 +827,10 @@ class HistoryStore:
 
         Idempotent: if the timer is already running, returns the current
         row unchanged without resetting ``started_at``.
+
+        If the timer is currently paused, this acts as a resume (sets
+        ``started_at=now``, clears ``paused_at``, preserves
+        ``accumulated_secs``).
         """
         async with self._lock:
             self._require_active_session_locked(session_id)
@@ -958,9 +966,18 @@ class HistoryStore:
     ) -> dict:
         """Mark a timer complete.
 
-        Sets ``completed_at`` (if not already set) and pauses the timer —
-        ``paused_at`` is set, elapsed time is accumulated, and
-        ``started_at`` is cleared.
+        Behaviour depends on the timer's current runtime state:
+
+        * Running (``started_at`` set, ``paused_at`` null): elapsed time
+          is accumulated, ``paused_at`` is set to now, ``started_at`` is
+          cleared, and ``completed_at`` is set (if not already set).
+        * Already paused (``paused_at`` set): only ``completed_at`` is
+          set (if not already set). ``paused_at``, ``started_at`` and
+          ``accumulated_secs`` are left untouched — the timer was not
+          running so there is no elapsed to accumulate.
+        * Never started: ``completed_at`` is set (if not already set)
+          and ``paused_at`` is set to now so the row has a well-defined
+          terminal state.
         """
         async with self._lock:
             self._require_active_session_locked(session_id)
@@ -973,28 +990,49 @@ class HistoryStore:
                 )
 
             now_ts = now_iso_utc()
-            now_dt = parse_iso(now_ts)
-
-            elapsed = 0
-            if (
-                row["started_at"] is not None
-                and row["paused_at"] is None
-                and now_dt is not None
-            ):
-                started_dt = parse_iso(row["started_at"])
-                if started_dt is not None:
-                    elapsed = max(0, int((now_dt - started_dt).total_seconds()))
-            new_accum = (row["accumulated_secs"] or 0) + elapsed
-
             completed_at = row["completed_at"] if row["completed_at"] else now_ts
 
-            await self._conn.execute(
-                "UPDATE session_timers "
-                "SET completed_at = ?, paused_at = ?, started_at = NULL, "
-                "accumulated_secs = ? "
-                "WHERE session_id = ? AND address = ? AND probe_index = ?",
-                (completed_at, now_ts, new_accum, session_id, address, probe_index),
-            )
+            if row["started_at"] is not None and row["paused_at"] is None:
+                # Running — accumulate elapsed and pause.
+                now_dt = parse_iso(now_ts)
+                started_dt = parse_iso(row["started_at"])
+                elapsed = 0
+                if now_dt is not None and started_dt is not None:
+                    elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+                new_accum = (row["accumulated_secs"] or 0) + elapsed
+
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ?, paused_at = ?, started_at = NULL, "
+                    "accumulated_secs = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (
+                        completed_at,
+                        now_ts,
+                        new_accum,
+                        session_id,
+                        address,
+                        probe_index,
+                    ),
+                )
+            elif row["paused_at"] is not None:
+                # Already paused — only set completed_at.
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (completed_at, session_id, address, probe_index),
+                )
+            else:
+                # Never started — set completed_at and give paused_at a
+                # well-defined terminal value.
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ?, paused_at = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (completed_at, now_ts, session_id, address, probe_index),
+                )
+
             await self._conn.commit()
             row = await self._fetch_timer_locked(session_id, address, probe_index)
             assert row is not None
