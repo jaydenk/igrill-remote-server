@@ -2711,6 +2711,8 @@
 
     renderDevices();
     renderSessionBanner();
+    /* Keep IdleCookView (Task 4) in sync with legacy device/probe state. */
+    if (typeof renderIdleCookView === "function") renderIdleCookView();
 
     /* Append to charts if session is active */
     if (session.id != null && payload.data) {
@@ -2783,6 +2785,7 @@
     if (address && state) {
       deviceBleStates[address] = state;
       renderDevices();
+      if (typeof renderIdleCookView === "function") renderIdleCookView();
     }
   }
 
@@ -3591,11 +3594,257 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* IdleCookView (Task 4)                                               */
+  /*                                                                      */
+  /* Renders the Cook tab when SessionStore.status === "none":            */
+  /*   - hero with "Start Cook" (disabled until at least one connected    */
+  /*     device exists; clicking sets store status to "configuring" —     */
+  /*     actual start flow wires up in Task 6).                           */
+  /*   - empty state when no devices are known, with a link to Settings.  */
+  /*   - one card per discovered device: name + connection badge + a     */
+  /*     row per probe showing the current temp and a 3-minute            */
+  /*     sparkline backed by RollingBuffer.instance.                      */
+  /*                                                                      */
+  /* When status === "active" we swap to a minimal placeholder that       */
+  /* Task 7's ActiveSessionView will replace.                             */
+  /*                                                                      */
+  /* Data sources:                                                         */
+  /*   - Device list / BLE state / probe data: the legacy in-IIFE         */
+  /*     `devices` + `deviceBleStates` maps (this module lives inside the */
+  /*     same IIFE, so it shares their closure).                          */
+  /*   - Session lifecycle: `window.SessionStore.instance` state.         */
+  /*   - Sparkline series: `window.RollingBuffer.instance.getSeries()`.   */
+  /*                                                                      */
+  /* Update cadence: re-render on every SessionStore dispatch (which      */
+  /* covers status changes, readings, session start/end). Readings are    */
+  /* the highest-frequency event and still only fire at BLE poll cadence  */
+  /* (single-digit Hz max), so an event-driven redraw stays cheap and     */
+  /* avoids the complexity of an rAF loop.                                */
+  /* ------------------------------------------------------------------ */
+
+  var idleCookView          = document.getElementById("idleCookView");
+  var idleCookBody          = document.getElementById("idleCookBody");
+  var idleCookSub           = document.getElementById("idleCookSub");
+  var activeCookPlaceholder = document.getElementById("activeCookPlaceholder");
+  var btnStartCook          = document.getElementById("btnStartCook");
+
+  var SPARKLINE_WIDTH  = 120;
+  var SPARKLINE_HEIGHT = 30;
+  var SPARKLINE_PAD    = 2;
+
+  function idleCookConnectedCount() {
+    /* "Connected" means we've seen the device and its latest BLE state
+     * is not a terminal offline value. Unknown counts as connected
+     * because readings arrive before a state event is ever observed. */
+    var count = 0;
+    for (var addr in devices) {
+      if (!Object.prototype.hasOwnProperty.call(devices, addr)) continue;
+      var bstate = deviceBleStates[addr];
+      if (bstate === "disconnected" || bstate === "backoff") continue;
+      count++;
+    }
+    return count;
+  }
+
+  function idleCookStateLabel(bstate) {
+    if (!bstate) return { text: "Pending", cls: "pending" };
+    if (bstate === "disconnected" || bstate === "backoff") {
+      return { text: bleStateLabel(bstate), cls: "offline" };
+    }
+    if (bstate === "connecting" || bstate === "authenticating" || bstate === "discovered") {
+      return { text: bleStateLabel(bstate), cls: "pending" };
+    }
+    return { text: bleStateLabel(bstate), cls: "" };
+  }
+
+  function buildSparkline(series) {
+    /* series: [{ts, tempC}, ...]. Need >=2 points to draw a line. */
+    if (!series || series.length < 2) {
+      var emptySpan = document.createElement("span");
+      emptySpan.className = "idle-sparkline-empty";
+      emptySpan.textContent = series && series.length === 1 ? "\u2026" : "";
+      return emptySpan;
+    }
+
+    var minTs = series[0].ts;
+    var maxTs = series[series.length - 1].ts;
+    var tsRange = maxTs - minTs || 1;
+
+    var minT = Infinity, maxT = -Infinity;
+    for (var i = 0; i < series.length; i++) {
+      var v = series[i].tempC;
+      if (v < minT) minT = v;
+      if (v > maxT) maxT = v;
+    }
+    var tRange = maxT - minT;
+    var flat = tRange < 0.01;
+    if (flat) tRange = 1;
+
+    var innerW = SPARKLINE_WIDTH - SPARKLINE_PAD * 2;
+    var innerH = SPARKLINE_HEIGHT - SPARKLINE_PAD * 2;
+
+    var points = [];
+    for (var j = 0; j < series.length; j++) {
+      var x = SPARKLINE_PAD + ((series[j].ts - minTs) / tsRange) * innerW;
+      var yNorm = flat ? 0.5 : 1 - ((series[j].tempC - minT) / tRange);
+      var y = SPARKLINE_PAD + yNorm * innerH;
+      points.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "idle-sparkline");
+    svg.setAttribute("viewBox", "0 0 " + SPARKLINE_WIDTH + " " + SPARKLINE_HEIGHT);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("aria-hidden", "true");
+
+    var poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    poly.setAttribute("points", points.join(" "));
+    svg.appendChild(poly);
+
+    return svg;
+  }
+
+  function renderIdleCookBody() {
+    while (idleCookBody.firstChild) {
+      idleCookBody.removeChild(idleCookBody.firstChild);
+    }
+
+    var deviceKeys = Object.keys(devices);
+
+    if (deviceKeys.length === 0) {
+      var empty = el("div", "idle-cook-empty");
+      empty.appendChild(el("p", null, "Connect a device in Settings to begin."));
+      var link = document.createElement("button");
+      link.className = "link-btn";
+      link.type = "button";
+      link.textContent = "Open Settings";
+      link.addEventListener("click", function () {
+        setActiveTab("settings");
+      });
+      empty.appendChild(link);
+      idleCookBody.appendChild(empty);
+      return;
+    }
+
+    var grid = el("div", "idle-device-cards");
+
+    deviceKeys.forEach(function (address) {
+      var dev = devices[address];
+      var data = (dev && dev.data) || {};
+      var name = data.name || address;
+      var probes = Array.isArray(data.probes) ? data.probes : [];
+      var bleState = deviceBleStates[address];
+      var stateInfo = idleCookStateLabel(bleState);
+
+      var card = el("div", "idle-device-card");
+
+      var header = el("div", "idle-device-header");
+      header.appendChild(el("div", "idle-device-name", name));
+      header.appendChild(el("span", "idle-device-state " + stateInfo.cls, stateInfo.text));
+      card.appendChild(header);
+
+      if (probes.length === 0) {
+        card.appendChild(el("div", "idle-sparkline-empty", "Waiting for readings\u2026"));
+      } else {
+        var probesWrap = el("div", "idle-probes");
+        probes.forEach(function (p) {
+          if (!p || p.index == null) return;
+          var row = el("div", "idle-probe-row");
+          row.appendChild(el("div", "idle-probe-label", "Probe " + p.index));
+
+          if (p.unplugged || p.temperature == null) {
+            row.appendChild(el("div", "idle-probe-temp unplugged", "\u2014"));
+            row.appendChild(el("span", "idle-sparkline-empty", p.unplugged ? "Unplugged" : ""));
+          } else {
+            var tempText = Number(p.temperature).toFixed(1) + "\u00B0";
+            row.appendChild(el("div", "idle-probe-temp", tempText));
+            var series = [];
+            if (window.RollingBuffer && window.RollingBuffer.instance) {
+              series = window.RollingBuffer.instance.getSeries(address, p.index);
+            }
+            row.appendChild(buildSparkline(series));
+          }
+          probesWrap.appendChild(row);
+        });
+        card.appendChild(probesWrap);
+      }
+
+      grid.appendChild(card);
+    });
+
+    idleCookBody.appendChild(grid);
+  }
+
+  function updateStartCookButton() {
+    if (!btnStartCook) return;
+    var n = idleCookConnectedCount();
+    var disabled = n === 0;
+    btnStartCook.disabled = disabled;
+    btnStartCook.setAttribute("aria-disabled", disabled ? "true" : "false");
+    if (idleCookSub) {
+      if (disabled) {
+        idleCookSub.textContent = "Connect a device in Settings to enable Start Cook.";
+      } else {
+        idleCookSub.textContent =
+          (n === 1 ? "1 device ready. " : n + " devices ready. ") +
+          "Start a cook to track temperatures, targets and alerts.";
+      }
+    }
+  }
+
+  function renderIdleCookView() {
+    if (!idleCookView || !activeCookPlaceholder) return;
+    var storeState =
+      window.SessionStore && window.SessionStore.instance
+        ? window.SessionStore.instance.getState()
+        : { status: "none" };
+
+    if (storeState.status === "active") {
+      idleCookView.style.display = "none";
+      activeCookPlaceholder.style.display = "";
+      return;
+    }
+
+    idleCookView.style.display = "";
+    activeCookPlaceholder.style.display = "none";
+    updateStartCookButton();
+    renderIdleCookBody();
+  }
+
+  if (btnStartCook) {
+    btnStartCook.addEventListener("click", function () {
+      if (btnStartCook.disabled) return;
+      /* Nudge the store into a configuring status; Task 6 will add a
+       * proper action type and the real configure flow. For now this
+       * is intentionally a no-op at the reducer layer (unknown action
+       * types return current state). */
+      if (window.SessionStore && window.SessionStore.instance) {
+        window.SessionStore.instance.dispatch({
+          type: "__set_status__",
+          payload: { status: "configuring" },
+        });
+      }
+    });
+  }
+
+  /* Subscribe to SessionStore to re-render on any state change. Readings
+   * flow through the store reducer, so this also catches live temp
+   * updates for the numeric readout. The sparkline itself reads from
+   * RollingBuffer at render time (RollingBuffer has its own
+   * subscription and prunes to the 3-minute window). */
+  if (window.SessionStore && window.SessionStore.instance) {
+    window.SessionStore.instance.subscribe(function () {
+      renderIdleCookView();
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Init                                                                */
   /* ------------------------------------------------------------------ */
 
   renderSessionBanner();
   renderDevices();
+  renderIdleCookView();
   /* Honour any hash set on first paint (e.g. a deep link to #settings). */
   setActiveTab(tabFromHash());
   connect();
