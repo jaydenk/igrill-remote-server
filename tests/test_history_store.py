@@ -1093,6 +1093,47 @@ async def test_discard_session_clears_active_state(store, sample_address):
 
 
 @pytest.mark.asyncio
+async def test_discard_session_preserves_in_memory_state_on_commit_failure(
+    store, sample_address, monkeypatch
+):
+    """If commit() raises, in-memory session state must NOT be cleared.
+
+    This guards the correctness of discard_session when the database
+    commit fails mid-operation: the transaction is rolled back (so the
+    sessions row still exists on disk), and the in-memory active-session
+    tracking must also remain untouched so the two stay consistent.
+    """
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_current_session_id() == sid
+
+    # Make commit fail to simulate a disk/transaction error.
+    original_commit = store._conn.commit
+
+    async def failing_commit():
+        raise RuntimeError("simulated commit failure")
+
+    monkeypatch.setattr(store._conn, "commit", failing_commit)
+
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await store.discard_session(sid)
+
+    # Restore commit so the rest of the test can interact with the DB.
+    monkeypatch.setattr(store._conn, "commit", original_commit)
+
+    # In-memory state must still reflect the active session.
+    assert await store.get_current_session_id() == sid
+    assert await store.is_session_active() is True
+
+    # On-disk row must still exist (ROLLBACK on exception).
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
 async def test_discard_session_returns_false_for_unknown_id(store):
     """Unknown session_id returns False without raising."""
     result = await store.discard_session("deadbeef" * 4)

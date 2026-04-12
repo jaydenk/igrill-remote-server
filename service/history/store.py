@@ -255,13 +255,12 @@ class HistoryStore:
         ``session_id`` did not exist.
         """
         async with self._lock:
-            # Clear active state first so concurrent callers that read
-            # _current_session_id after us see the cleared value.
-            if self._current_session_id == session_id:
-                self._current_session_id = None
-                self._current_session_start_ts = None
-            if self._last_session_id == session_id:
-                self._last_session_id = None
+            # Capture which in-memory fields would need clearing so the
+            # clears only run after a successful commit.  If the commit
+            # fails we leave in-memory state untouched to stay consistent
+            # with on-disk state.
+            was_current = self._current_session_id == session_id
+            was_last = self._last_session_id == session_id
 
             try:
                 await self._conn.execute("BEGIN")
@@ -297,6 +296,13 @@ class HistoryStore:
                 )
                 deleted = cursor.rowcount > 0
                 await self._conn.commit()
+
+                # Commit succeeded: safe to clear in-memory state.
+                if was_current:
+                    self._current_session_id = None
+                    self._current_session_start_ts = None
+                if was_last:
+                    self._last_session_id = None
             except Exception:
                 await self._conn.execute("ROLLBACK")
                 raise
