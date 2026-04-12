@@ -69,7 +69,25 @@
     ".asv-chip.in-range{background:rgba(74,222,128,0.18);color:var(--green,#4ade80);}",
     ".asv-chip.over{background:rgba(245,166,35,0.2);color:var(--amber,#f5a623);}",
     ".asv-chip.unknown{background:var(--bg-secondary,#16213e);color:var(--text-muted,#6c6c80);}",
-    ".asv-probe-timer{font-size:0.78rem;color:var(--text-muted,#6c6c80);margin-top:0.15rem;}",
+    ".asv-chip.done{background:rgba(74,222,128,0.18);color:var(--green,#4ade80);}",
+    ".asv-probe-timer{display:flex;flex-direction:column;gap:0.35rem;margin-top:0.2rem;padding-top:0.5rem;border-top:1px solid var(--border,#2a2a4a);}",
+    ".asv-timer-row{display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;}",
+    ".asv-timer-label{font-size:0.7rem;color:var(--text-secondary,#a0a0b8);text-transform:uppercase;letter-spacing:0.06em;}",
+    ".asv-timer-value{font-size:1rem;font-weight:600;color:var(--text-primary,#e0e0e0);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-variant-numeric:tabular-nums;font-feature-settings:\"tnum\" 1;letter-spacing:0.02em;}",
+    ".asv-timer-btn{background:var(--bg-secondary,#16213e);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:6px;padding:0.25rem 0.55rem;font-size:0.72rem;font-family:inherit;cursor:pointer;line-height:1.2;}",
+    ".asv-timer-btn:hover{background:var(--bg-card-hover,#134074);}",
+    ".asv-timer-btn:focus-visible{outline:2px solid var(--brand,#935240);outline-offset:2px;}",
+    ".asv-timer-btn.primary{background:var(--brand,#935240);border-color:var(--brand,#935240);color:#fff;}",
+    ".asv-timer-btn.primary:hover{background:#a36350;}",
+    ".asv-timer-add{background:transparent;border:none;color:var(--brand,#935240);font-size:0.8rem;font-family:inherit;cursor:pointer;padding:0.1rem 0;align-self:flex-start;text-decoration:underline dotted;text-underline-offset:3px;}",
+    ".asv-timer-add:hover{color:#a36350;}",
+    ".asv-timer-add:focus-visible{outline:2px solid var(--brand,#935240);outline-offset:2px;border-radius:4px;}",
+    ".asv-timer-picker{display:flex;flex-direction:column;gap:0.4rem;padding:0.5rem;background:var(--bg-secondary,#16213e);border:1px solid var(--border,#2a2a4a);border-radius:6px;}",
+    ".asv-timer-picker-row{display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;}",
+    ".asv-timer-picker label{font-size:0.72rem;color:var(--text-secondary,#a0a0b8);}",
+    ".asv-timer-picker select,.asv-timer-picker input{background:var(--bg-card,#0f3460);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:4px;padding:0.2rem 0.35rem;font-size:0.8rem;font-family:inherit;}",
+    ".asv-timer-picker input.duration{width:7rem;font-variant-numeric:tabular-nums;}",
+    ".asv-timer-picker-actions{display:flex;gap:0.35rem;justify-content:flex-end;}",
     /* Actions */
     ".asv-actions{display:flex;gap:0.5rem;flex-wrap:wrap;}",
     ".asv-btn{background:var(--bg-card,#0f3460);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:8px;padding:0.6rem 1rem;font-size:0.95rem;font-family:inherit;cursor:pointer;transition:background 0.15s;}",
@@ -191,6 +209,99 @@
     return null;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Timer helpers                                                       */
+  /* ------------------------------------------------------------------ */
+
+  /* Parse an ISO-ish timestamp to epoch seconds, tolerating the Python
+   * `now_iso_utc()` format (which may or may not include a timezone). */
+  function parseIsoSeconds(value) {
+    if (value == null) return null;
+    if (typeof value === "number") {
+      return value > 1e12 ? value / 1000 : value;
+    }
+    if (typeof value !== "string") return null;
+    var s = value;
+    /* If no timezone suffix present, assume UTC (server writes UTC). */
+    if (!/[zZ]$|[+\-]\d{2}:?\d{2}$/.test(s)) s += "Z";
+    var ms = Date.parse(s);
+    if (isNaN(ms)) return null;
+    return ms / 1000;
+  }
+
+  /* Format seconds as mm:ss when under an hour, hh:mm:ss otherwise. */
+  function formatTimerDisplay(secs) {
+    if (secs == null || !isFinite(secs) || secs < 0) secs = 0;
+    secs = Math.floor(secs);
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    if (h > 0) return h + ":" + pad(m) + ":" + pad(s);
+    return pad(m) + ":" + pad(s);
+  }
+
+  /* Compute the effective elapsed accumulated seconds for a timer row.
+   * This is `accumulatedSecs + (now - startedAt)` if running, else just
+   * `accumulatedSecs`. */
+  function effectiveAccumulated(timer) {
+    var acc = timer.accumulatedSecs || 0;
+    if (timer.startedAt && !timer.pausedAt && !timer.completedAt) {
+      var startSecs = parseIsoSeconds(timer.startedAt);
+      if (startSecs != null) {
+        var delta = nowSeconds() - startSecs;
+        if (delta > 0) acc += delta;
+      }
+    }
+    return acc;
+  }
+
+  /* Compute the current display seconds for a timer row (mode-aware). */
+  function timerDisplaySecs(timer) {
+    var acc = effectiveAccumulated(timer);
+    if (timer.mode === "count_down") {
+      var d = timer.durationSecs || 0;
+      return Math.max(0, d - acc);
+    }
+    return acc;
+  }
+
+  function timerIsRunning(timer) {
+    return !!(timer && timer.startedAt && !timer.pausedAt && !timer.completedAt);
+  }
+
+  function timerHasProgress(timer) {
+    if (!timer) return false;
+    if ((timer.accumulatedSecs || 0) > 0) return true;
+    return timerIsRunning(timer);
+  }
+
+  /* Parse `mm:ss` or `hh:mm:ss` into total seconds. Returns null on bad
+   * input. Also accepts plain integers (treated as seconds). */
+  function parseDurationInput(value) {
+    if (value == null) return null;
+    var trimmed = String(value).trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) {
+      var n = parseInt(trimmed, 10);
+      return n >= 0 ? n : null;
+    }
+    var parts = trimmed.split(":").map(function (p) { return p.trim(); });
+    if (parts.length < 2 || parts.length > 3) return null;
+    for (var i = 0; i < parts.length; i++) {
+      if (!/^\d+$/.test(parts[i])) return null;
+    }
+    var total = 0;
+    if (parts.length === 2) {
+      total = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+    } else {
+      total = parseInt(parts[0], 10) * 3600 +
+              parseInt(parts[1], 10) * 60 +
+              parseInt(parts[2], 10);
+    }
+    return total > 0 ? total : null;
+  }
+
   /* Probe palette matching the legacy chart. */
   var PROBE_COLORS = ["#e94560", "#4ade80", "#fbbf24", "#60a5fa"];
   function probeColor(probeIndex) {
@@ -230,6 +341,18 @@
     /* Name edit state */
     var editingName = false;
 
+    /* Timer UI state.
+     *
+     * `timerPickerOpenFor` — set of probe indices whose inline upsert
+     *   picker is currently visible. Survives re-renders so that the
+     *   picker stays open across tick redraws (the tick loop skips a full
+     *   probe-cards rebuild; it only updates value elements in-place). */
+    var timerPickerOpenFor = {};
+    /* Per-probe-index refs to the live value DOM node so onTick can
+     * update them without rebuilding the card tree. Populated on each
+     * full probe-card render and consulted each 1Hz tick. */
+    var timerValueRefs = {};
+
     function getState() {
       if (!global.SessionStore || !global.SessionStore.instance) {
         return { status: "none", activeSession: null, readings: {}, devices: [] };
@@ -259,6 +382,64 @@
       } catch (e) {
         if (typeof console !== "undefined") {
           console.warn("[ActiveSessionView] session_update_request failed:", e);
+        }
+      }
+    }
+
+    function getWs() {
+      return global.__activeSessionWs || global.ws || null;
+    }
+
+    /* Pick the "default" device address for probe timers.
+     *
+     * Targets today only carry `probe_index` (no device binding), so we
+     * mirror `currentTempForTarget`'s first-match semantics: prefer the
+     * session's devices array, fall back to any address we have readings
+     * for, then fall back to an existing timer row (if the user already
+     * configured one for this probe index). */
+    function resolveTimerAddress(state, probeIndex) {
+      var timers = (state.activeSession && state.activeSession.timers) || [];
+      for (var i = 0; i < timers.length; i++) {
+        if (timers[i] && timers[i].probeIndex === probeIndex && timers[i].address) {
+          return timers[i].address;
+        }
+      }
+      var devices = state.devices || [];
+      for (var j = 0; j < devices.length; j++) {
+        var d = devices[j];
+        if (d && d.address) return d.address;
+        if (typeof d === "string" && d) return d;
+      }
+      var readings = state.readings || {};
+      for (var addr in readings) {
+        if (Object.prototype.hasOwnProperty.call(readings, addr)) return addr;
+      }
+      return null;
+    }
+
+    function findTimerForProbe(state, probeIndex) {
+      var timers = (state.activeSession && state.activeSession.timers) || [];
+      for (var i = 0; i < timers.length; i++) {
+        /* Use the first timer whose probeIndex matches, mirroring the
+         * first-match semantics used elsewhere for address binding. */
+        if (timers[i] && timers[i].probeIndex === probeIndex) return timers[i];
+      }
+      return null;
+    }
+
+    function sendProbeTimerRequest(payload) {
+      var ws = getWs();
+      if (!ws || ws.readyState !== 1 /* OPEN */) return;
+      try {
+        ws.send(JSON.stringify({
+          v: 2,
+          type: "probe_timer_request",
+          requestId: "asv-timer-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+          payload: payload,
+        }));
+      } catch (e) {
+        if (typeof console !== "undefined") {
+          console.warn("[ActiveSessionView] probe_timer_request failed:", e);
         }
       }
     }
@@ -459,6 +640,9 @@
       while (probesGridEl.firstChild) {
         probesGridEl.removeChild(probesGridEl.firstChild);
       }
+      /* Drop stale refs; we're rebuilding the whole grid. The live
+       * tick-updated nodes will be re-registered below. */
+      timerValueRefs = {};
 
       if (targets.length === 0) {
         var empty = el("div", "asv-chart-empty", "No targets configured for this cook.");
@@ -485,11 +669,223 @@
         var status = classifyProbe(t, reading ? reading.tempC : null);
         card.appendChild(el("span", "asv-chip " + status.kind, status.label));
 
-        /* Task 8 replaces this stub with real timer controls. */
-        card.appendChild(el("div", "asv-probe-timer", "Timer: \u2014"));
+        card.appendChild(renderTimerSection(state, t, label));
 
         probesGridEl.appendChild(card);
       });
+    }
+
+    /* Build the timer subsection for a probe card. Returns a DOM node
+     * to append to the card. */
+    function renderTimerSection(state, target, probeLabel) {
+      var probeIndex = target.probe_index;
+      var timer = findTimerForProbe(state, probeIndex);
+      var wrap = el("div", "asv-probe-timer");
+
+      /* Picker open? Show picker (plus any existing timer summary above
+       * it). The user can dismiss by clicking Cancel. */
+      var pickerOpen = !!timerPickerOpenFor[probeIndex];
+
+      if (!timer) {
+        if (pickerOpen) {
+          wrap.appendChild(renderTimerPicker(probeIndex, probeLabel, null));
+        } else {
+          var addBtn = el("button", "asv-timer-add", "Add timer");
+          addBtn.type = "button";
+          addBtn.setAttribute(
+            "aria-label", "Add timer for " + probeLabel
+          );
+          addBtn.addEventListener("click", function () {
+            timerPickerOpenFor[probeIndex] = true;
+            renderProbeCards();
+          });
+          wrap.appendChild(addBtn);
+        }
+        return wrap;
+      }
+
+      /* We have a timer row. Decide which buttons to show. */
+      var completed = !!timer.completedAt;
+      var running = timerIsRunning(timer);
+      var hasProgress = timerHasProgress(timer);
+      var mode = timer.mode;
+
+      /* Label line: "Count up" or "1:30:00 countdown" */
+      var labelText;
+      if (mode === "count_down") {
+        labelText = formatTimerDisplay(timer.durationSecs || 0) + " countdown";
+      } else {
+        labelText = "Count up";
+      }
+      wrap.appendChild(el("div", "asv-timer-label", labelText));
+
+      var displayRow = el("div", "asv-timer-row");
+      var valueEl;
+      if (completed) {
+        valueEl = el("span", "asv-timer-value", "Done");
+        displayRow.appendChild(valueEl);
+        displayRow.appendChild(el("span", "asv-chip done", "Completed"));
+      } else {
+        valueEl = el("span", "asv-timer-value", formatTimerDisplay(timerDisplaySecs(timer)));
+        displayRow.appendChild(valueEl);
+      }
+      wrap.appendChild(displayRow);
+
+      /* Track the live value node for the tick loop; only required for
+       * running (non-completed) timers, but we track paused ones too so
+       * a resume from the server refreshes them correctly via the full
+       * re-render path. */
+      timerValueRefs[probeIndex] = {
+        node: valueEl,
+        timer: timer,
+      };
+
+      var controls = el("div", "asv-timer-row");
+      var probeName = probeLabel || ("probe " + probeIndex);
+
+      function mkBtn(text, primary, ariaSuffix, action) {
+        var b = el("button", "asv-timer-btn" + (primary ? " primary" : ""), text);
+        b.type = "button";
+        b.setAttribute("aria-label", ariaSuffix + " " + probeName + " timer");
+        b.addEventListener("click", function () {
+          var st = getState();
+          var address = timer.address || resolveTimerAddress(st, probeIndex);
+          if (!address) return;
+          sendProbeTimerRequest({
+            address: address,
+            probe_index: probeIndex,
+            action: action,
+          });
+        });
+        return b;
+      }
+
+      if (completed) {
+        controls.appendChild(mkBtn("Reset", false, "Reset", "reset"));
+      } else if (running) {
+        controls.appendChild(mkBtn("Pause", false, "Pause", "pause"));
+        controls.appendChild(mkBtn("Reset", false, "Reset", "reset"));
+      } else if (!hasProgress) {
+        /* Paused and never started. Offer Start (primary) + Reset only
+         * for count_down so users can re-open the picker to change the
+         * duration via a separate "Edit" affordance (not in this task). */
+        controls.appendChild(mkBtn("Start", true, "Start", "start"));
+        if (mode === "count_down") {
+          controls.appendChild(mkBtn("Reset", false, "Reset", "reset"));
+        }
+      } else {
+        /* Paused mid-run. */
+        controls.appendChild(mkBtn("Resume", true, "Resume", "resume"));
+        controls.appendChild(mkBtn("Reset", false, "Reset", "reset"));
+      }
+      wrap.appendChild(controls);
+
+      if (pickerOpen) {
+        wrap.appendChild(renderTimerPicker(probeIndex, probeLabel, timer));
+      }
+
+      return wrap;
+    }
+
+    /* Build the inline upsert picker for a probe. `existing` is the
+     * current timer row (if any) so we can pre-fill mode/duration. */
+    function renderTimerPicker(probeIndex, probeLabel, existing) {
+      var picker = el("div", "asv-timer-picker");
+
+      var modeRow = el("div", "asv-timer-picker-row");
+      var modeLabel = el("label", null, "Mode");
+      var modeSelect = document.createElement("select");
+      modeSelect.setAttribute("aria-label", "Timer mode for " + probeLabel);
+      var optUp = document.createElement("option");
+      optUp.value = "count_up";
+      optUp.textContent = "Count up";
+      var optDown = document.createElement("option");
+      optDown.value = "count_down";
+      optDown.textContent = "Count down";
+      modeSelect.appendChild(optUp);
+      modeSelect.appendChild(optDown);
+      modeSelect.value = (existing && existing.mode) || "count_down";
+      modeLabel.appendChild(modeSelect);
+      modeRow.appendChild(modeLabel);
+      picker.appendChild(modeRow);
+
+      var durRow = el("div", "asv-timer-picker-row");
+      var durLabel = el("label", null, "Duration");
+      var durInput = document.createElement("input");
+      durInput.type = "text";
+      durInput.className = "duration";
+      durInput.placeholder = "mm:ss or hh:mm:ss";
+      durInput.setAttribute("aria-label", "Timer duration for " + probeLabel);
+      if (existing && existing.durationSecs) {
+        durInput.value = formatTimerDisplay(existing.durationSecs);
+      } else {
+        durInput.value = "30:00";
+      }
+      durLabel.appendChild(durInput);
+      durRow.appendChild(durLabel);
+      picker.appendChild(durRow);
+
+      function syncDurationVisibility() {
+        durRow.style.display = modeSelect.value === "count_down" ? "" : "none";
+      }
+      modeSelect.addEventListener("change", syncDurationVisibility);
+      syncDurationVisibility();
+
+      var actions = el("div", "asv-timer-picker-actions");
+      var cancel = el("button", "asv-timer-btn", "Cancel");
+      cancel.type = "button";
+      cancel.setAttribute("aria-label", "Cancel timer setup for " + probeLabel);
+      cancel.addEventListener("click", function () {
+        delete timerPickerOpenFor[probeIndex];
+        renderProbeCards();
+      });
+      var confirm = el("button", "asv-timer-btn primary", "Save");
+      confirm.type = "button";
+      confirm.setAttribute("aria-label", "Save timer for " + probeLabel);
+      confirm.addEventListener("click", function () {
+        var mode = modeSelect.value;
+        var payload = {
+          probe_index: probeIndex,
+          action: "upsert",
+          mode: mode,
+        };
+        if (mode === "count_down") {
+          var secs = parseDurationInput(durInput.value);
+          if (!secs) {
+            durInput.focus();
+            durInput.select();
+            return;
+          }
+          payload.duration_secs = secs;
+        }
+        var st = getState();
+        var address = resolveTimerAddress(st, probeIndex);
+        if (!address) return;
+        payload.address = address;
+        sendProbeTimerRequest(payload);
+        delete timerPickerOpenFor[probeIndex];
+        renderProbeCards();
+      });
+      actions.appendChild(cancel);
+      actions.appendChild(confirm);
+      picker.appendChild(actions);
+
+      return picker;
+    }
+
+    /* Lightweight per-tick update for running timer displays. Avoids
+     * rebuilding probe cards every second; just updates the textContent
+     * of each live value node. */
+    function tickTimers() {
+      for (var k in timerValueRefs) {
+        if (!Object.prototype.hasOwnProperty.call(timerValueRefs, k)) continue;
+        var ref = timerValueRefs[k];
+        if (!ref || !ref.node || !ref.timer) continue;
+        var t = ref.timer;
+        if (t.completedAt) continue;
+        if (!timerIsRunning(t)) continue;
+        ref.node.textContent = formatTimerDisplay(timerDisplaySecs(t));
+      }
     }
 
     /* --------------------------------------------------------------- */
@@ -738,9 +1134,11 @@
       if (!mounted) return;
       /* Recompute elapsed/progress from startedAt each tick so that
        * background-tab throttling doesn't drift the clock. Also nudge
-       * the chart so the X axis keeps pace even in quiet periods. */
+       * the chart so the X axis keeps pace even in quiet periods, and
+       * update any running probe timers in-place. */
       renderHeader();
       refreshChartData();
+      tickTimers();
     }
 
     function mount(target) {
@@ -772,6 +1170,8 @@
       container = null;
       root = null;
       editingName = false;
+      timerPickerOpenFor = {};
+      timerValueRefs = {};
     }
 
     return {
@@ -783,6 +1183,11 @@
         formatTarget: formatTarget,
         classifyProbe: classifyProbe,
         sessionStartSeconds: sessionStartSeconds,
+        formatTimerDisplay: formatTimerDisplay,
+        parseDurationInput: parseDurationInput,
+        parseIsoSeconds: parseIsoSeconds,
+        timerDisplaySecs: timerDisplaySecs,
+        effectiveAccumulated: effectiveAccumulated,
       },
     };
   }
