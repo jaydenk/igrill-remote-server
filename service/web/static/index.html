@@ -6,6 +6,15 @@
   <title>iGrill Remote</title>
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css">
   <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <!-- Session-first redesign state modules. See service/web/static/js/stores/. -->
+  <script src="/static/js/stores/sessionStore.js"></script>
+  <script src="/static/js/stores/rollingBuffer.js"></script>
+  <script src="/static/js/components/probeTargetConfigSheet.js"></script>
+  <script src="/static/js/components/startCookFlow.js"></script>
+  <script src="/static/js/components/notesEditor.js"></script>
+  <script src="/static/js/components/addProbeFlow.js"></script>
+  <script src="/static/js/components/endSessionFlow.js"></script>
+  <script src="/static/js/components/activeSessionView.js"></script>
   <style>
     :root {
       --bg-primary: #1a1a2e;
@@ -15,7 +24,10 @@
       --text-primary: #e0e0e0;
       --text-secondary: #a0a0b8;
       --text-muted: #6c6c80;
-      --accent: #e94560;
+      --accent: #e94560;              /* Legacy accent; prefer --brand for primary actions. */
+      --brand: #935240;                /* Primary brand colour. WCAG AA vs #fff: 4.83:1 (passes normal text). */
+      --brand-tint: rgba(147, 82, 64, 0.18);
+      --brand-hover: #a46352;          /* Brand lightened ~8% for hover. */
       --green: #4ade80;
       --red: #f87171;
       --yellow: #fbbf24;
@@ -94,6 +106,8 @@
 
     .tab-btn {
       flex: 1;
+      /* min-height 44px satisfies iOS tap-target guidance. */
+      min-height: 44px;
       padding: 0.75rem 1rem;
       background: none;
       border: none;
@@ -111,9 +125,264 @@
       color: var(--text-primary);
     }
 
+    .tab-btn:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: -2px;
+    }
+
     .tab-btn.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
+      color: var(--brand);
+      border-bottom-color: var(--brand);
+    }
+
+    /* -- Cook tab placeholder ------------------------------------------- */
+
+    .cook-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 0.75rem;
+      padding: 3rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .cook-placeholder-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .cook-placeholder-body {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      max-width: 24rem;
+    }
+
+    .btn-brand {
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .btn-brand:hover {
+      background: var(--brand-hover);
+      opacity: 1;
+    }
+
+    .btn-brand:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
+    }
+
+    /* Legacy DOM retained inside Cook tab for continuity with earlier
+       JS; hidden visually until Task 4/6/7/11 replaces the UI. */
+    .legacy-cook-scaffolding {
+      display: none;
+    }
+
+    /* -- Idle Cook View (Task 4) ---------------------------------------- */
+
+    .idle-cook {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .idle-cook-hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 0.85rem;
+      padding: 1.75rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .idle-cook-hero-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .idle-cook-hero-sub {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      max-width: 26rem;
+    }
+
+    .idle-cook-empty {
+      text-align: center;
+      padding: 2.5rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--text-secondary);
+    }
+
+    .idle-cook-empty p {
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }
+
+    .idle-cook-empty .link-btn {
+      background: none;
+      border: none;
+      color: var(--brand);
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font: inherit;
+    }
+
+    .idle-cook-empty .link-btn:hover {
+      background: var(--brand-tint);
+    }
+
+    .idle-cook-empty .link-btn:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
+    }
+
+    .idle-device-cards {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+
+    @media (min-width: 640px) {
+      .idle-device-cards {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .idle-device-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .idle-device-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .idle-device-name {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .idle-device-state {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .idle-device-state.offline {
+      background: rgba(248, 113, 113, 0.15);
+      color: var(--red);
+    }
+
+    .idle-device-state.pending {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--yellow);
+    }
+
+    .idle-probes {
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+    }
+
+    .idle-probe-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.65rem;
+      background: var(--bg-secondary);
+      border-radius: 6px;
+    }
+
+    .idle-probe-label {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      font-weight: 500;
+      min-width: 4.5rem;
+    }
+
+    .idle-probe-temp {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+      min-width: 3.5rem;
+      text-align: right;
+    }
+
+    .idle-probe-temp.unplugged {
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    .idle-sparkline {
+      flex: 1;
+      height: 30px;
+      max-width: 120px;
+    }
+
+    .idle-sparkline polyline {
+      fill: none;
+      stroke: var(--brand);
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .idle-sparkline-empty {
+      flex: 1;
+      max-width: 120px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-align: right;
+      font-style: italic;
+    }
+
+    .active-cook-placeholder {
+      padding: 2rem 1.5rem;
+      text-align: center;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text-secondary);
+    }
+
+    .active-cook-placeholder h2 {
+      font-size: 1.1rem;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
     }
 
     /* -- Tab Content ---------------------------------------------------- */
@@ -214,6 +483,8 @@
       align-items: center;
       justify-content: center;
       gap: 0.4rem;
+      /* min-height 44px satisfies the iOS HIG / WCAG tap-target guideline. */
+      min-height: 44px;
       padding: 0.6rem 1.25rem;
       border: none;
       border-radius: 6px;
@@ -232,9 +503,17 @@
       cursor: not-allowed;
     }
 
+    /* btn-primary now maps to the brand colour to keep primary actions
+       consistent across Cook Start, Start Session, Start Simulation, etc.
+       Kept --accent available for legacy/tertiary highlights. */
     .btn-primary {
-      background: var(--accent);
+      background: var(--brand);
       color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--brand-hover);
+      opacity: 1;
     }
 
     .btn-danger {
@@ -521,7 +800,7 @@
     }
 
     .session-card.selected {
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .session-card-date {
@@ -611,6 +890,82 @@
       flex-wrap: wrap;
     }
 
+    .history-detail-header .detail-actions {
+      margin-top: 0.75rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .history-detail-header .detail-notes-body {
+      color: var(--text-secondary);
+      font-style: italic;
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+    }
+
+    .history-timers {
+      margin-top: 1rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius, 10px);
+      padding: 0.75rem 1rem;
+    }
+
+    .history-timers-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+
+    .history-timers-empty {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .history-timer-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      padding: 0.3rem 0;
+      font-size: 0.9rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .history-timer-row:first-of-type {
+      border-top: none;
+    }
+
+    .history-timer-row .timer-probe {
+      font-weight: 500;
+      min-width: 9ch;
+    }
+
+    .history-timer-row .timer-mode {
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+    }
+
+    .history-timer-row .timer-time {
+      font-variant-numeric: tabular-nums;
+      margin-left: auto;
+      font-weight: 500;
+    }
+
+    .history-timer-row .timer-badge {
+      font-size: 0.7rem;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      background: var(--green, #4ade80);
+      color: #0b2410;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
     .history-empty {
       text-align: center;
       padding: 3rem 1rem;
@@ -624,15 +979,18 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 1rem 1.25rem;
+      border-top: 3px solid var(--brand);
     }
 
     .settings-section-title {
-      font-size: 0.75rem;
-      font-weight: 600;
+      font-size: 0.78rem;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--text-muted);
-      margin-bottom: 0.75rem;
+      letter-spacing: 0.09em;
+      color: var(--brand);
+      margin-bottom: 0.85rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
     }
 
     .settings-row {
@@ -713,7 +1071,7 @@
 
     .log-level-row select:focus {
       outline: none;
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .log-level-row select.flash-success {
@@ -751,7 +1109,7 @@
 
     .sim-field select:focus {
       outline: none;
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .sim-field select:disabled {
@@ -838,9 +1196,9 @@
     }
 
     .device-check input[type="checkbox"] {
-      accent-color: var(--accent);
-      width: 16px;
-      height: 16px;
+      accent-color: var(--brand);
+      width: 18px;
+      height: 18px;
     }
 
     .device-check label {
@@ -974,74 +1332,100 @@
   </div>
 </header>
 
-<nav class="tab-bar">
-  <button class="tab-btn active" data-tab="live">Live</button>
-  <button class="tab-btn" data-tab="history">History</button>
-  <button class="tab-btn" data-tab="settings">Settings</button>
+<nav class="tab-bar" role="tablist" aria-label="Primary">
+  <button class="tab-btn active" data-tab="cook" role="tab" aria-selected="true" aria-controls="tab-cook" id="tab-btn-cook">Cook</button>
+  <button class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history" id="tab-btn-history">History</button>
+  <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings" id="tab-btn-settings">Settings</button>
 </nav>
 
 <!-- ================================================================== -->
-<!-- Live Tab                                                            -->
+<!-- Cook Tab (placeholder until Task 4 builds IdleCookView)             -->
 <!-- ================================================================== -->
-<div class="tab-content active" id="tab-live">
+<div class="tab-content active" id="tab-cook" role="tabpanel" aria-labelledby="tab-btn-cook">
 
-  <!-- Session Banner -->
-  <section>
-    <div class="section-title">Session</div>
-    <div class="session-banner" id="sessionBanner">
-      <div class="session-banner-idle" id="sessionIdle">
-        <p>No active session</p>
-        <div style="margin: 0.25rem 0;">
-          <input type="text" id="sessionNameInput" placeholder="Session name (optional)"
-                 class="form-input" style="width: 100%; max-width: 300px; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem;">
-        </div>
-        <button class="btn btn-primary" id="btnStartSession">Start Session</button>
-      </div>
-      <div class="session-banner-active" id="sessionActive" style="display:none;">
-        <div class="session-name" id="sessionName" style="display:none;"></div>
-        <div class="session-banner-active-row">
-          <div class="session-info">
-            <div class="session-stat">
-              <span class="session-stat-label">Duration</span>
-              <span class="session-stat-value" id="sessionDuration">&mdash;</span>
-            </div>
-            <div class="session-stat">
-              <span class="session-stat-label">Devices</span>
-              <span class="session-stat-value" id="sessionDeviceCount">0</span>
-            </div>
+  <!-- IdleCookView (Task 4): device cards + rolling 3-minute sparklines -->
+  <section class="idle-cook" id="idleCookView">
+    <div class="idle-cook-hero">
+      <div class="idle-cook-hero-title">Ready to cook</div>
+      <p class="idle-cook-hero-sub" id="idleCookSub">
+        Start a cook to begin tracking temperatures, targets and alerts.
+      </p>
+      <button class="btn btn-brand" id="btnStartCook" disabled aria-disabled="true">Start Cook</button>
+    </div>
+
+    <div id="idleCookBody">
+      <!-- Device cards or empty state injected here by JS -->
+    </div>
+  </section>
+
+  <!-- Active session view container. Mounted by ActiveSessionView (Task 7)
+       whenever SessionStore.status === "active". -->
+  <section class="active-cook-view" id="activeCookPlaceholder" style="display:none;"></section>
+
+  <!--
+    Legacy DOM retained so session/chart/device logic keeps functioning
+    without errors while the Cook view is rebuilt across Tasks 4–11.
+    Task 4 will replace this wholesale with IdleCookView.
+  -->
+  <div class="legacy-cook-scaffolding" aria-hidden="true">
+    <!-- Session Banner -->
+    <section>
+      <div class="section-title">Session</div>
+      <div class="session-banner" id="sessionBanner">
+        <div class="session-banner-idle" id="sessionIdle">
+          <p>No active session</p>
+          <div style="margin: 0.25rem 0;">
+            <input type="text" id="sessionNameInput" placeholder="Session name (optional)"
+                   class="form-input" style="width: 100%; max-width: 300px; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem;">
           </div>
-          <button class="btn btn-danger" id="btnEndSession">End Session</button>
+          <button class="btn btn-primary" id="btnStartSession">Start Session</button>
+        </div>
+        <div class="session-banner-active" id="sessionActive" style="display:none;">
+          <div class="session-name" id="sessionName" style="display:none;"></div>
+          <div class="session-banner-active-row">
+            <div class="session-info">
+              <div class="session-stat">
+                <span class="session-stat-label">Duration</span>
+                <span class="session-stat-value" id="sessionDuration">&mdash;</span>
+              </div>
+              <div class="session-stat">
+                <span class="session-stat-label">Devices</span>
+                <span class="session-stat-value" id="sessionDeviceCount">0</span>
+              </div>
+            </div>
+            <button class="btn btn-danger" id="btnEndSession">End Session</button>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Devices -->
-  <section>
-    <div class="section-title">Devices</div>
-    <div class="device-cards" id="deviceCards">
-      <div class="empty-state" id="emptyState">
-        <p>No devices discovered yet.</p>
-        <p>Waiting for data&hellip;</p>
+    <!-- Devices (moved visually into Settings > Connected Devices) -->
+    <section>
+      <div class="section-title">Devices</div>
+      <div class="device-cards" id="deviceCards">
+        <div class="empty-state" id="emptyState">
+          <p>No devices discovered yet.</p>
+          <p>Waiting for data&hellip;</p>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Charts (visible when session active) -->
-  <section class="charts-section" id="chartsSection">
-    <div class="section-title">Temperature Charts</div>
-    <div class="chart-container" id="combinedChartContainer">
-      <div class="chart-title">All Probes</div>
-      <div class="chart-wrapper" id="combinedChartWrapper"></div>
-    </div>
-    <div class="per-probe-charts" id="perProbeCharts"></div>
-  </section>
+    <!-- Charts (visible when session active) -->
+    <section class="charts-section" id="chartsSection">
+      <div class="section-title">Temperature Charts</div>
+      <div class="chart-container" id="combinedChartContainer">
+        <div class="chart-title">All Probes</div>
+        <div class="chart-wrapper" id="combinedChartWrapper"></div>
+      </div>
+      <div class="per-probe-charts" id="perProbeCharts"></div>
+    </section>
+  </div>
 </div>
 
 <!-- ================================================================== -->
 <!-- History Tab                                                         -->
 <!-- ================================================================== -->
-<div class="tab-content" id="tab-history">
+<div class="tab-content" id="tab-history" role="tabpanel" aria-labelledby="tab-btn-history">
   <div class="history-layout">
     <!-- Session List -->
     <div class="history-list-pane" id="historyListPane">
@@ -1057,6 +1441,10 @@
     <div class="history-detail-pane hidden" id="historyDetailPane">
       <button class="btn btn-ghost history-back-btn" id="historyBackBtn">&larr; Back to list</button>
       <div class="history-detail-header" id="historyDetailHeader"></div>
+      <div class="history-timers" id="historyTimersSection" style="display:none;">
+        <div class="history-timers-title">Timers</div>
+        <div id="historyTimersList"></div>
+      </div>
       <div class="section-title">Temperature Charts</div>
       <div class="chart-container" id="historyCombinedChartContainer">
         <div class="chart-title">All Probes</div>
@@ -1072,67 +1460,13 @@
 <!-- ================================================================== -->
 <!-- Settings Tab                                                        -->
 <!-- ================================================================== -->
-<div class="tab-content" id="tab-settings">
+<div class="tab-content" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings">
 
-  <!-- Connected Devices -->
+  <!-- Connected Devices (most actionable — shown first) -->
   <section class="settings-section">
     <div class="settings-section-title">Connected Devices</div>
     <div id="settingsDeviceList">
       <p class="settings-no-devices">No devices discovered yet.</p>
-    </div>
-  </section>
-
-  <!-- Server Info -->
-  <section class="settings-section">
-    <div class="settings-section-title">Server Information</div>
-    <div id="settingsServerInfo">
-      <div class="settings-row">
-        <span class="settings-label">Uptime</span>
-        <span class="settings-value" id="settingsUptime">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Poll Interval</span>
-        <span class="settings-value" id="settingsPollInterval">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Scan Interval</span>
-        <span class="settings-value" id="settingsScanInterval">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Devices Total</span>
-        <span class="settings-value" id="settingsDevicesTotal">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Devices Connected</span>
-        <span class="settings-value" id="settingsDevicesConnected">&mdash;</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- Log Level Controls -->
-  <section class="settings-section">
-    <div class="settings-section-title">Log Levels</div>
-    <div id="settingsLogLevels">
-      <div class="log-level-row" data-logger="igrill.ble">
-        <span class="log-logger-name">igrill.ble</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.ws">
-        <span class="log-logger-name">igrill.ws</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.session">
-        <span class="log-logger-name">igrill.session</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.alert">
-        <span class="log-logger-name">igrill.alert</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.http">
-        <span class="log-logger-name">igrill.http</span>
-        <select></select>
-      </div>
     </div>
   </section>
 
@@ -1160,8 +1494,62 @@
           </select>
         </div>
       </div>
-      <button class="btn btn-primary" id="btnSimToggle">Start Simulation</button>
+      <button class="btn btn-brand" id="btnSimToggle">Start Simulation</button>
       <div id="simFlash" style="display:none; font-size:0.82rem; margin-top:0.5rem;"></div>
+    </div>
+  </section>
+
+  <!-- Log Level Controls (least common — shown alongside diagnostics) -->
+  <section class="settings-section">
+    <div class="settings-section-title">Log Levels</div>
+    <div id="settingsLogLevels">
+      <div class="log-level-row" data-logger="igrill.ble">
+        <span class="log-logger-name">igrill.ble</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.ws">
+        <span class="log-logger-name">igrill.ws</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.session">
+        <span class="log-logger-name">igrill.session</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.alert">
+        <span class="log-logger-name">igrill.alert</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.http">
+        <span class="log-logger-name">igrill.http</span>
+        <select></select>
+      </div>
+    </div>
+  </section>
+
+  <!-- Server Info (diagnostic — shown last) -->
+  <section class="settings-section">
+    <div class="settings-section-title">Server Information</div>
+    <div id="settingsServerInfo">
+      <div class="settings-row">
+        <span class="settings-label">Uptime</span>
+        <span class="settings-value" id="settingsUptime">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Poll Interval</span>
+        <span class="settings-value" id="settingsPollInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Scan Interval</span>
+        <span class="settings-value" id="settingsScanInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Total</span>
+        <span class="settings-value" id="settingsDevicesTotal">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Connected</span>
+        <span class="settings-value" id="settingsDevicesConnected">&mdash;</span>
+      </div>
     </div>
   </section>
 </div>
@@ -1247,28 +1635,62 @@
   var modalTargetList = document.getElementById("modalTargetList");
 
   /* ------------------------------------------------------------------ */
-  /* Tab switching                                                       */
+  /* Tab switching (hash-routed: #cook | #history | #settings)           */
   /* ------------------------------------------------------------------ */
 
+  var VALID_TABS = ["cook", "history", "settings"];
+  var DEFAULT_TAB = "cook";
   var tabButtons = document.querySelectorAll(".tab-btn");
   var tabPanels  = document.querySelectorAll(".tab-content");
 
+  function tabFromHash() {
+    var raw = (window.location.hash || "").replace(/^#/, "").toLowerCase();
+    return VALID_TABS.indexOf(raw) >= 0 ? raw : DEFAULT_TAB;
+  }
+
+  function setActiveTab(target, opts) {
+    opts = opts || {};
+    if (VALID_TABS.indexOf(target) < 0) target = DEFAULT_TAB;
+
+    tabButtons.forEach(function (b) {
+      var isActive = b.getAttribute("data-tab") === target;
+      b.classList.toggle("active", isActive);
+      b.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+    tabPanels.forEach(function (p) { p.classList.remove("active"); });
+    var panel = document.getElementById("tab-" + target);
+    if (panel) panel.classList.add("active");
+
+    /* Keep URL hash in sync without creating history spam. */
+    if (opts.updateHash !== false) {
+      var desired = "#" + target;
+      if (window.location.hash !== desired) {
+        /* replaceState avoids cluttering back-button history on tab clicks. */
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", desired);
+        } else {
+          window.location.hash = desired;
+        }
+      }
+    }
+
+    if (target === "history") {
+      fetchHistorySessions();
+    } else if (target === "settings") {
+      refreshSettingsDevices();
+      fetchServerHealth();
+    }
+  }
+
   tabButtons.forEach(function (btn) {
     btn.addEventListener("click", function () {
-      var target = btn.getAttribute("data-tab");
-      tabButtons.forEach(function (b) { b.classList.remove("active"); });
-      tabPanels.forEach(function (p) { p.classList.remove("active"); });
-      btn.classList.add("active");
-      var panel = document.getElementById("tab-" + target);
-      if (panel) panel.classList.add("active");
-
-      if (target === "history") {
-        fetchHistorySessions();
-      } else if (target === "settings") {
-        refreshSettingsDevices();
-        fetchServerHealth();
-      }
+      setActiveTab(btn.getAttribute("data-tab"));
     });
+  });
+
+  window.addEventListener("hashchange", function () {
+    /* Don't rewrite the hash we just read from. */
+    setActiveTab(tabFromHash(), { updateHash: false });
   });
 
   /* ------------------------------------------------------------------ */
@@ -2221,6 +2643,23 @@
     var url = protocol + "//" + window.location.host + "/ws";
     ws = new WebSocket(url);
 
+    /* Wire the new session-first state modules to this connection.
+     * They run in parallel with the legacy dashboard — no UI migration yet.
+     * See service/web/static/js/stores/. */
+    if (window.SessionStore && window.SessionStore.instance) {
+      window.SessionStore.instance.attachWebSocket(ws);
+    }
+    if (
+      window.RollingBuffer &&
+      window.RollingBuffer.instance &&
+      window.SessionStore &&
+      window.SessionStore.instance &&
+      !window._rollingBufferAttached
+    ) {
+      window.RollingBuffer.instance.attachToStore(window.SessionStore.instance);
+      window._rollingBufferAttached = true;
+    }
+
     ws.onopen = function () {
       reconnectAttempt = 0;
       reconnectDelay = 1000;
@@ -2275,7 +2714,45 @@
   /* Message Handling                                                     */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* WebSocket message subscribers (for new components).                  */
+  /*                                                                      */
+  /* The legacy dashboard dispatches via a switch below; StartCookFlow    */
+  /* and other session-first components need to observe responses        */
+  /* (session_start_ack, error) without modifying that switch.           */
+  /* ------------------------------------------------------------------ */
+
+  var wsMessageSubscribers = [];
+
+  function subscribeWsMessage(fn) {
+    if (typeof fn !== "function") return function () {};
+    wsMessageSubscribers.push(fn);
+    return function () {
+      var i = wsMessageSubscribers.indexOf(fn);
+      if (i !== -1) wsMessageSubscribers.splice(i, 1);
+    };
+  }
+
+  function notifyWsSubscribers(msg) {
+    /* Iterate over a copy so subscribers may unsubscribe during
+     * dispatch without mutating the list we're walking. */
+    var snapshot = wsMessageSubscribers.slice();
+    for (var i = 0; i < snapshot.length; i++) {
+      try { snapshot[i](msg); } catch (e) {
+        console.warn("[iGrill] ws subscriber threw:", e);
+      }
+    }
+  }
+
+  function sendWs(envelope) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket is not open");
+    }
+    ws.send(JSON.stringify(envelope));
+  }
+
   function handleMessage(msg) {
+    notifyWsSubscribers(msg);
     var type = msg.type;
     var payload = msg.payload || {};
 
@@ -2320,10 +2797,79 @@
         handleTargetAlert(payload, "exceeded");
         break;
 
+      case "session_discarded":
+        handleSessionDiscarded(payload);
+        break;
+
+      case "session_notes_update":
+        handleSessionNotesUpdate(payload);
+        break;
+
       case "error":
         console.warn("[iGrill] Server error:", payload.code, payload.message);
         break;
     }
+  }
+
+  /** Purge any local references to a discarded session.
+   *  Discarded sessions are filtered out server-side on list fetches,
+   *  but a client that's currently showing one in the History tab must
+   *  drop the card + detail view so the UI doesn't reference a ghost
+   *  session. */
+  function handleSessionDiscarded(payload) {
+    var discardedId = payload && payload.sessionId;
+    if (!discardedId) return;
+
+    /* Remove the card for this session if it's in the list. */
+    var card = historySessionList.querySelector(
+      '.session-card[data-session-id="' + cssEscape(discardedId) + '"]'
+    );
+    if (card && card.parentNode) {
+      card.parentNode.removeChild(card);
+    }
+    if (historySessionList.querySelectorAll(".session-card").length === 0) {
+      historyEmpty.style.display = "";
+    }
+
+    /* If we're currently viewing this session's detail, bail back to
+     * the list and drop the cached payload. */
+    if (selectedHistorySessionId === discardedId) {
+      if (historyNotesEditor) {
+        try { historyNotesEditor.close(); } catch (_) { /* no-op */ }
+        historyNotesEditor = null;
+      }
+      historyDetailCache = null;
+      showHistoryList();
+    }
+  }
+
+  /** When a `session_notes_update` broadcast fires, refresh the
+   *  cached detail + open editor so multi-client edits stay coherent. */
+  function handleSessionNotesUpdate(payload) {
+    if (!payload) return;
+    /* The broadcast reuses the raw `session_notes` row shape which is
+     * snake_case (`session_id`). The ack/handler variant camel-cases
+     * elsewhere — accept both to be resilient. */
+    var sid = payload.session_id || payload.sessionId;
+    var body = typeof payload.body === "string" ? payload.body : null;
+    if (!sid || body == null) return;
+
+    if (historyDetailCache && historyDetailCache.sessionId === sid) {
+      historyDetailCache.notesBody = body;
+      renderHistoryDetailHeader(historyDetailCache, historyDetailCache);
+    }
+    if (historyNotesEditor && historyNotesEditor.sessionId === sid) {
+      try { historyNotesEditor.setBody(body); } catch (_) { /* no-op */ }
+    }
+  }
+
+  /** Minimal CSS.escape polyfill for attribute selectors (Safari <10
+   *  has it, but sessionId strings are ULIDs so cheap to sanitise). */
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function handleStatus(payload) {
@@ -2376,6 +2922,10 @@
 
     renderDevices();
     renderSessionBanner();
+    /* Keep IdleCookView (Task 4) in sync with legacy device/probe state. */
+    if (typeof renderIdleCookView === "function") renderIdleCookView();
+    /* Keep the Settings > Connected Devices list live (Task 13). */
+    if (typeof refreshSettingsDevices === "function") refreshSettingsDevices();
 
     /* Append to charts if session is active */
     if (session.id != null && payload.data) {
@@ -2448,6 +2998,9 @@
     if (address && state) {
       deviceBleStates[address] = state;
       renderDevices();
+      if (typeof renderIdleCookView === "function") renderIdleCookView();
+      /* Keep the Settings > Connected Devices list live (Task 13). */
+      if (typeof refreshSettingsDevices === "function") refreshSettingsDevices();
     }
   }
 
@@ -2475,10 +3028,19 @@
   var historyCombinedChartWrapper = document.getElementById("historyCombinedChartWrapper");
   var historyPerProbeChartsEl    = document.getElementById("historyPerProbeCharts");
   var historySummaryGrid    = document.getElementById("historySummaryGrid");
+  var historyTimersSection  = document.getElementById("historyTimersSection");
+  var historyTimersList     = document.getElementById("historyTimersList");
 
   var historyCombinedChart  = null;
   var historyPerProbeCharts = {};
   var selectedHistorySessionId = null;
+  /* Cached detail payload for the currently selected session so the
+   * Edit Notes action and discard purging can re-render without a
+   * refetch. */
+  var historyDetailCache = null;
+  /* Reference to an open NotesEditor instance for the history tab so
+   * we can push external updates / close on discard. */
+  var historyNotesEditor = null;
 
   historyBackBtn.addEventListener("click", function () {
     showHistoryList();
@@ -2512,6 +3074,96 @@
     historyCombinedChartWrapper.textContent = "";
     historyPerProbeChartsEl.textContent = "";
     historySummaryGrid.textContent = "";
+    historyTimersList.textContent = "";
+    historyTimersSection.style.display = "none";
+  }
+
+  /** Format a duration in seconds as "1h 30m" / "45m" / "30s". */
+  function formatHmsDuration(secs) {
+    if (secs == null || !isFinite(secs)) return "\u2014";
+    secs = Math.max(0, Math.floor(secs));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    var parts = [];
+    if (h > 0) parts.push(h + "h");
+    if (m > 0) parts.push(m + "m");
+    if (h === 0 && m === 0) parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  /** Total elapsed seconds for a completed session (endTs - startTs). */
+  function sessionElapsedSecs(startIso, endIso) {
+    if (!startIso) return null;
+    var start = new Date(startIso);
+    var end = endIso ? new Date(endIso) : new Date();
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+    return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+  }
+
+  /** Compute the completed-timer display value (mode-aware).
+   *  For count_up: show `accumulatedSecs`.
+   *  For count_down: show `durationSecs` (the timer completed when it
+   *  drained to zero — "30:00 countdown" feels more truthful than
+   *  "00:00"). */
+  function historyTimerDisplaySecs(timer) {
+    var acc = timer.accumulatedSecs || 0;
+    if (timer.mode === "count_down") {
+      return timer.durationSecs || 0;
+    }
+    return acc;
+  }
+
+  /** "HH:MM:SS" / "MM:SS" padded. */
+  function formatTabularTime(secs) {
+    if (secs == null || !isFinite(secs)) return "--:--";
+    secs = Math.max(0, Math.floor(secs));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    if (h > 0) return h + ":" + pad(m) + ":" + pad(s);
+    return pad(m) + ":" + pad(s);
+  }
+
+  function timerModeLabel(mode) {
+    if (mode === "count_down") return "Countdown";
+    if (mode === "count_up") return "Count-up";
+    return mode || "Timer";
+  }
+
+  /** Resolve a probe label from the session's targets list (or fall
+   *  back to "Probe N"). */
+  function probeLabelFromTargets(probeIndex, targets) {
+    if (targets) {
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i].probe_index === probeIndex && targets[i].label) {
+          return targets[i].label + " (Probe " + probeIndex + ")";
+        }
+      }
+    }
+    return "Probe " + probeIndex;
+  }
+
+  function renderHistoryTimers(timers, targets) {
+    historyTimersList.textContent = "";
+    if (!timers || timers.length === 0) {
+      historyTimersSection.style.display = "none";
+      return;
+    }
+    historyTimersSection.style.display = "";
+    timers.forEach(function (t) {
+      var row = el("div", "history-timer-row");
+      row.appendChild(el("span", "timer-probe",
+        probeLabelFromTargets(t.probeIndex, targets)));
+      row.appendChild(el("span", "timer-mode", timerModeLabel(t.mode)));
+      row.appendChild(el("span", "timer-time",
+        formatTabularTime(historyTimerDisplaySecs(t))));
+      if (t.completedAt) {
+        row.appendChild(el("span", "timer-badge", "Completed"));
+      }
+      historyTimersList.appendChild(row);
+    });
   }
 
   function formatHistoryDate(isoString) {
@@ -2627,31 +3279,13 @@
   function loadHistoryDetail(sessionId, sessionMeta) {
     destroyHistoryCharts();
     showHistoryDetail();
+    historyDetailCache = null;
 
-    /* Render header */
-    historyDetailHeader.textContent = "";
-    var detailTitle = sessionMeta.name || "Session";
-    var h3 = el("h3", null, detailTitle + " \u2014 " + formatHistoryDate(sessionMeta.startTs));
-    historyDetailHeader.appendChild(h3);
-
-    if (sessionMeta.notes) {
-      var notesP = el("p", null, sessionMeta.notes);
-      notesP.style.cssText = "color:var(--text-secondary); font-style:italic; margin-top:0.5rem; font-size:0.9rem;";
-      historyDetailHeader.appendChild(notesP);
-    }
-
-    var metaDiv = el("div", "detail-meta");
-    metaDiv.appendChild(el("span", null, "Duration: " + formatHistoryDuration(sessionMeta.startTs, sessionMeta.endTs)));
-    if (sessionMeta.endReason) {
-      metaDiv.appendChild(el("span", null, "End reason: " + sessionMeta.endReason));
-    }
-    if (sessionMeta.devices && sessionMeta.devices.length > 0) {
-      var devNames = sessionMeta.devices.map(function (d) {
-        return d.name || d.address;
-      }).join(", ");
-      metaDiv.appendChild(el("span", null, "Devices: " + devNames));
-    }
-    historyDetailHeader.appendChild(metaDiv);
+    /* Render a provisional header from the list payload so the user
+     * sees something immediately. The detail fetch will replace this
+     * with the enriched version (notesBody, targetDurationSecs,
+     * timers). */
+    renderHistoryDetailHeader(sessionMeta, null);
 
     /* Fetch full session data */
     fetch("/api/sessions/" + encodeURIComponent(sessionId))
@@ -2660,12 +3294,134 @@
         return resp.json();
       })
       .then(function (data) {
+        /* Merge list metadata with detail payload so we keep endTs /
+         * endReason fields the detail endpoint doesn't echo back. */
+        var merged = {
+          sessionId: data.sessionId || sessionId,
+          name: data.name != null ? data.name : sessionMeta.name,
+          startTs: sessionMeta.startTs,
+          endTs: sessionMeta.endTs,
+          endReason: sessionMeta.endReason,
+          devices: data.devices || sessionMeta.devices || [],
+          notesBody: data.notesBody != null
+            ? data.notesBody
+            : (sessionMeta.notes || null),
+          targetDurationSecs: data.targetDurationSecs != null
+            ? data.targetDurationSecs
+            : null,
+          timers: data.timers || [],
+          targets: data.targets || [],
+        };
+        historyDetailCache = merged;
+        renderHistoryDetailHeader(merged, merged);
+        renderHistoryTimers(merged.timers, merged.targets);
         renderHistoryCharts(data);
       })
       .catch(function (err) {
         console.warn("[iGrill] Failed to fetch session detail:", err);
         historyDetailHeader.appendChild(el("p", "history-empty", "Failed to load session data."));
       });
+  }
+
+  /** Render the history detail header.
+   *  `meta` comes from the list payload (has `name`, `startTs`,
+   *  `endTs`, `notes`, `endReason`, `devices`). `detail` — when
+   *  provided — is the enriched `/api/sessions/{id}` payload and
+   *  carries `notesBody`, `targetDurationSecs`. */
+  function renderHistoryDetailHeader(meta, detail) {
+    historyDetailHeader.textContent = "";
+
+    var detailTitle = meta.name || "Session";
+    historyDetailHeader.appendChild(
+      el("h3", null, detailTitle + " \u2014 " + formatHistoryDate(meta.startTs))
+    );
+
+    /* Notes body: prefer the enriched `notesBody`, fall back to list
+     * `notes` preview. Render as a paragraph preserving line breaks. */
+    var notesBody = detail && detail.notesBody != null
+      ? detail.notesBody
+      : (meta.notes || null);
+    if (notesBody) {
+      historyDetailHeader.appendChild(
+        el("p", "detail-notes-body", notesBody)
+      );
+    }
+
+    var metaDiv = el("div", "detail-meta");
+    var elapsedSecs = sessionElapsedSecs(meta.startTs, meta.endTs);
+    metaDiv.appendChild(el("span", null,
+      "Elapsed: " + formatHmsDuration(elapsedSecs)));
+    if (detail && detail.targetDurationSecs != null) {
+      metaDiv.appendChild(el("span", null,
+        "Target: " + formatHmsDuration(detail.targetDurationSecs)));
+    }
+    if (meta.endReason) {
+      metaDiv.appendChild(el("span", null, "End reason: " + meta.endReason));
+    }
+    if (meta.devices && meta.devices.length > 0) {
+      var devNames = meta.devices.map(function (d) {
+        return d.name || d.address;
+      }).join(", ");
+      metaDiv.appendChild(el("span", null, "Devices: " + devNames));
+    }
+    historyDetailHeader.appendChild(metaDiv);
+
+    /* Action row: Edit notes (only when we have the full detail —
+     * otherwise we can't guarantee the payload we'll post back has
+     * been sourced from the server). */
+    if (detail) {
+      var actions = el("div", "detail-actions");
+      var editBtn = el("button", "btn btn-ghost", "Edit notes");
+      editBtn.type = "button";
+      editBtn.addEventListener("click", function () {
+        openHistoryNotesEditor(detail);
+      });
+      actions.appendChild(editBtn);
+      historyDetailHeader.appendChild(actions);
+    }
+  }
+
+  /** Open the reusable NotesEditor scoped to a saved session. The
+   *  editor auto-saves by dispatching a `session_notes_update_request`
+   *  over the WebSocket; server ack re-renders the header with the
+   *  new body. */
+  function openHistoryNotesEditor(detail) {
+    if (!window.NotesEditor) {
+      console.warn("[iGrill] NotesEditor not loaded");
+      return;
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("[iGrill] WebSocket not open — cannot edit notes");
+      return;
+    }
+    var sessionId = detail.sessionId;
+    var handle = window.NotesEditor.open({
+      sessionId: sessionId,
+      initialBody: detail.notesBody || "",
+      onSave: function (body) {
+        sendWs({
+          v: 2,
+          type: "session_notes_update_request",
+          requestId: generateRequestId(),
+          payload: {
+            sessionId: sessionId,
+            body: body,
+          },
+        });
+        /* Optimistically update the cached body so closing/reopening
+         * shows the latest text even before the ack lands. */
+        if (historyDetailCache && historyDetailCache.sessionId === sessionId) {
+          historyDetailCache.notesBody = body;
+          renderHistoryDetailHeader(historyDetailCache, historyDetailCache);
+        }
+      },
+    });
+    historyNotesEditor = handle;
+    var originalClose = handle.close;
+    handle.close = function () {
+      historyNotesEditor = null;
+      originalClose();
+    };
   }
 
   function renderHistoryCharts(data) {
@@ -3069,7 +3825,7 @@
 
   function updateSimUI() {
     btnSimToggle.textContent = simRunning ? "Stop Simulation" : "Start Simulation";
-    btnSimToggle.className = simRunning ? "btn btn-danger" : "btn btn-primary";
+    btnSimToggle.className = simRunning ? "btn btn-danger" : "btn btn-brand";
     simProbesSelect.disabled = simRunning;
     simSpeedSelect.disabled = simRunning;
   }
@@ -3256,11 +4012,290 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* IdleCookView (Task 4)                                               */
+  /*                                                                      */
+  /* Renders the Cook tab when SessionStore.status === "none":            */
+  /*   - hero with "Start Cook" (disabled until at least one connected    */
+  /*     device exists; clicking sets store status to "configuring" —     */
+  /*     actual start flow wires up in Task 6).                           */
+  /*   - empty state when no devices are known, with a link to Settings.  */
+  /*   - one card per discovered device: name + connection badge + a     */
+  /*     row per probe showing the current temp and a 3-minute            */
+  /*     sparkline backed by RollingBuffer.instance.                      */
+  /*                                                                      */
+  /* When status === "active" we swap to a minimal placeholder that       */
+  /* Task 7's ActiveSessionView will replace.                             */
+  /*                                                                      */
+  /* Data sources:                                                         */
+  /*   - Device list / BLE state / probe data: the legacy in-IIFE         */
+  /*     `devices` + `deviceBleStates` maps (this module lives inside the */
+  /*     same IIFE, so it shares their closure).                          */
+  /*   - Session lifecycle: `window.SessionStore.instance` state.         */
+  /*   - Sparkline series: `window.RollingBuffer.instance.getSeries()`.   */
+  /*                                                                      */
+  /* Update cadence: re-render on every SessionStore dispatch (which      */
+  /* covers status changes, readings, session start/end). Readings are    */
+  /* the highest-frequency event and still only fire at BLE poll cadence  */
+  /* (single-digit Hz max), so an event-driven redraw stays cheap and     */
+  /* avoids the complexity of an rAF loop.                                */
+  /* ------------------------------------------------------------------ */
+
+  var idleCookView          = document.getElementById("idleCookView");
+  var idleCookBody          = document.getElementById("idleCookBody");
+  var idleCookSub           = document.getElementById("idleCookSub");
+  var activeCookPlaceholder = document.getElementById("activeCookPlaceholder");
+  var btnStartCook          = document.getElementById("btnStartCook");
+
+  var SPARKLINE_WIDTH  = 120;
+  var SPARKLINE_HEIGHT = 30;
+  var SPARKLINE_PAD    = 2;
+
+  function idleCookConnectedCount() {
+    /* "Connected" means we've seen the device and its latest BLE state
+     * is not a terminal offline value. Unknown counts as connected
+     * because readings arrive before a state event is ever observed. */
+    var count = 0;
+    for (var addr in devices) {
+      if (!Object.prototype.hasOwnProperty.call(devices, addr)) continue;
+      var bstate = deviceBleStates[addr];
+      if (bstate === "disconnected" || bstate === "backoff") continue;
+      count++;
+    }
+    return count;
+  }
+
+  function idleCookStateLabel(bstate) {
+    if (!bstate) return { text: "Pending", cls: "pending" };
+    if (bstate === "disconnected" || bstate === "backoff") {
+      return { text: bleStateLabel(bstate), cls: "offline" };
+    }
+    if (bstate === "connecting" || bstate === "authenticating" || bstate === "discovered") {
+      return { text: bleStateLabel(bstate), cls: "pending" };
+    }
+    return { text: bleStateLabel(bstate), cls: "" };
+  }
+
+  function buildSparkline(series) {
+    /* series: [{ts, tempC}, ...]. Need >=2 points to draw a line. */
+    if (!series || series.length < 2) {
+      var emptySpan = document.createElement("span");
+      emptySpan.className = "idle-sparkline-empty";
+      emptySpan.textContent = series && series.length === 1 ? "\u2026" : "";
+      return emptySpan;
+    }
+
+    var minTs = series[0].ts;
+    var maxTs = series[series.length - 1].ts;
+    var tsRange = maxTs - minTs || 1;
+
+    var minT = Infinity, maxT = -Infinity;
+    for (var i = 0; i < series.length; i++) {
+      var v = series[i].tempC;
+      if (v < minT) minT = v;
+      if (v > maxT) maxT = v;
+    }
+    var tRange = maxT - minT;
+    var flat = tRange < 0.01;
+    if (flat) tRange = 1;
+
+    var innerW = SPARKLINE_WIDTH - SPARKLINE_PAD * 2;
+    var innerH = SPARKLINE_HEIGHT - SPARKLINE_PAD * 2;
+
+    var points = [];
+    for (var j = 0; j < series.length; j++) {
+      var x = SPARKLINE_PAD + ((series[j].ts - minTs) / tsRange) * innerW;
+      var yNorm = flat ? 0.5 : 1 - ((series[j].tempC - minT) / tRange);
+      var y = SPARKLINE_PAD + yNorm * innerH;
+      points.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "idle-sparkline");
+    svg.setAttribute("viewBox", "0 0 " + SPARKLINE_WIDTH + " " + SPARKLINE_HEIGHT);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("aria-hidden", "true");
+
+    var poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    poly.setAttribute("points", points.join(" "));
+    svg.appendChild(poly);
+
+    return svg;
+  }
+
+  function renderIdleCookBody() {
+    while (idleCookBody.firstChild) {
+      idleCookBody.removeChild(idleCookBody.firstChild);
+    }
+
+    var deviceKeys = Object.keys(devices);
+
+    if (deviceKeys.length === 0) {
+      var empty = el("div", "idle-cook-empty");
+      empty.appendChild(el("p", null, "Connect a device in Settings to begin."));
+      var link = document.createElement("button");
+      link.className = "link-btn";
+      link.type = "button";
+      link.textContent = "Open Settings";
+      link.addEventListener("click", function () {
+        setActiveTab("settings");
+      });
+      empty.appendChild(link);
+      idleCookBody.appendChild(empty);
+      return;
+    }
+
+    var grid = el("div", "idle-device-cards");
+
+    deviceKeys.forEach(function (address) {
+      var dev = devices[address];
+      var data = (dev && dev.data) || {};
+      var name = data.name || address;
+      var probes = Array.isArray(data.probes) ? data.probes : [];
+      var bleState = deviceBleStates[address];
+      var stateInfo = idleCookStateLabel(bleState);
+
+      var card = el("div", "idle-device-card");
+
+      var header = el("div", "idle-device-header");
+      header.appendChild(el("div", "idle-device-name", name));
+      header.appendChild(el("span", "idle-device-state " + stateInfo.cls, stateInfo.text));
+      card.appendChild(header);
+
+      if (probes.length === 0) {
+        card.appendChild(el("div", "idle-sparkline-empty", "Waiting for readings\u2026"));
+      } else {
+        var probesWrap = el("div", "idle-probes");
+        probes.forEach(function (p) {
+          if (!p || p.index == null) return;
+          var row = el("div", "idle-probe-row");
+          row.appendChild(el("div", "idle-probe-label", "Probe " + p.index));
+
+          if (p.unplugged || p.temperature == null) {
+            row.appendChild(el("div", "idle-probe-temp unplugged", "\u2014"));
+            row.appendChild(el("span", "idle-sparkline-empty", p.unplugged ? "Unplugged" : ""));
+          } else {
+            var tempText = Number(p.temperature).toFixed(1) + "\u00B0";
+            row.appendChild(el("div", "idle-probe-temp", tempText));
+            var series = [];
+            if (window.RollingBuffer && window.RollingBuffer.instance) {
+              series = window.RollingBuffer.instance.getSeries(address, p.index);
+            }
+            row.appendChild(buildSparkline(series));
+          }
+          probesWrap.appendChild(row);
+        });
+        card.appendChild(probesWrap);
+      }
+
+      grid.appendChild(card);
+    });
+
+    idleCookBody.appendChild(grid);
+  }
+
+  function updateStartCookButton() {
+    if (!btnStartCook) return;
+    var n = idleCookConnectedCount();
+    var disabled = n === 0;
+    btnStartCook.disabled = disabled;
+    btnStartCook.setAttribute("aria-disabled", disabled ? "true" : "false");
+    if (idleCookSub) {
+      if (disabled) {
+        idleCookSub.textContent = "Connect a device in Settings to enable Start Cook.";
+      } else {
+        idleCookSub.textContent =
+          (n === 1 ? "1 device ready. " : n + " devices ready. ") +
+          "Start a cook to track temperatures, targets and alerts.";
+      }
+    }
+  }
+
+  /* Tracks whether ActiveSessionView is currently mounted so we only
+   * call mount()/unmount() on status transitions, not every render. */
+  var activeSessionViewMounted = false;
+
+  function renderIdleCookView() {
+    if (!idleCookView || !activeCookPlaceholder) return;
+    var storeState =
+      window.SessionStore && window.SessionStore.instance
+        ? window.SessionStore.instance.getState()
+        : { status: "none" };
+
+    if (storeState.status === "active") {
+      idleCookView.style.display = "none";
+      activeCookPlaceholder.style.display = "";
+      if (!activeSessionViewMounted && window.ActiveSessionView) {
+        /* Hand ActiveSessionView our WebSocket/dispatch wiring so the
+         * Add Probe / Add Note / End Session actions (Tasks 9-11) can
+         * talk to the server without re-implementing send and request-
+         * id plumbing. `getDevices` returns the legacy device map,
+         * which carries the full probe-with-temperature rows that
+         * AddProbeFlow needs. */
+        window.ActiveSessionView.mount(activeCookPlaceholder, {
+          send: sendWs,
+          onMessage: subscribeWsMessage,
+          generateRequestId: generateRequestId,
+          getDevices: function () { return devices; },
+          temperatureUnit: "C",
+        });
+        activeSessionViewMounted = true;
+      }
+      return;
+    }
+
+    if (activeSessionViewMounted && window.ActiveSessionView) {
+      window.ActiveSessionView.unmount();
+      activeSessionViewMounted = false;
+    }
+    idleCookView.style.display = "";
+    activeCookPlaceholder.style.display = "none";
+    updateStartCookButton();
+    renderIdleCookBody();
+  }
+
+  if (btnStartCook) {
+    btnStartCook.addEventListener("click", function () {
+      if (btnStartCook.disabled) return;
+      if (!window.StartCookFlow) {
+        console.warn("[iGrill] StartCookFlow not loaded");
+        return;
+      }
+      /* The flow reads `devices` from our closure and submits the
+       * session_start_request via sendWs. Auth, if configured server-
+       * side via IGRILL_SESSION_TOKEN, is enforced at WebSocket
+       * upgrade time — a browser without a valid token simply
+       * wouldn't have an open connection here. No additional token
+       * plumbing is needed on a per-message basis. */
+      window.StartCookFlow.open({
+        devices: devices,
+        send: sendWs,
+        generateRequestId: generateRequestId,
+        onMessage: subscribeWsMessage,
+        temperatureUnit: "C",
+      });
+    });
+  }
+
+  /* Subscribe to SessionStore to re-render on any state change. Readings
+   * flow through the store reducer, so this also catches live temp
+   * updates for the numeric readout. The sparkline itself reads from
+   * RollingBuffer at render time (RollingBuffer has its own
+   * subscription and prunes to the 3-minute window). */
+  if (window.SessionStore && window.SessionStore.instance) {
+    window.SessionStore.instance.subscribe(function () {
+      renderIdleCookView();
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Init                                                                */
   /* ------------------------------------------------------------------ */
 
   renderSessionBanner();
   renderDevices();
+  renderIdleCookView();
+  /* Honour any hash set on first paint (e.g. a deep link to #settings). */
+  setActiveTab(tabFromHash());
   connect();
 
 })();
