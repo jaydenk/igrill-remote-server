@@ -838,3 +838,151 @@ async def test_duplicate_seq_preserves_original(store, sample_address):
     assert len(items) == 1
     assert items[0]["temperature"] == 72.5
     assert items[0]["battery"] == 85
+
+
+# ---------------------------------------------------------------------------
+# Session notes CRUD (Task 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_primary_note_returns_none_when_no_notes(store, sample_address):
+    """get_primary_note should return None for a session with no notes rows."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_primary_note(sid) is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_creates_new_row(store, sample_address):
+    """First upsert should INSERT a session_notes row with matching timestamps."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    row = await store.upsert_primary_note(sid, "first draft")
+    assert row["session_id"] == sid
+    assert row["body"] == "first draft"
+    assert row["id"] is not None
+    assert row["created_at"] is not None
+    assert row["updated_at"] is not None
+    # On INSERT, created_at and updated_at are set to the same value.
+    assert row["created_at"] == row["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_updates_existing_row(store, sample_address, monkeypatch):
+    """A second upsert should UPDATE the same row — preserving id and created_at,
+    bumping updated_at."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    times = [t0, t0 + timedelta(seconds=30)]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    first = await store.upsert_primary_note(sid, "first")
+    second = await store.upsert_primary_note(sid, "second")
+
+    assert second["id"] == first["id"]
+    assert second["created_at"] == first["created_at"]
+    assert second["updated_at"] != first["updated_at"]
+    assert second["body"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_get_primary_note_returns_row_after_upsert(store, sample_address):
+    """get_primary_note should return the row created by upsert_primary_note."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    upserted = await store.upsert_primary_note(sid, "hello world")
+    fetched = await store.get_primary_note(sid)
+
+    assert fetched is not None
+    assert fetched == upserted
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_editable_after_session_ended(store, sample_address):
+    """Notes are editable on ENDED sessions — unlike timers, no active-session guard."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.upsert_primary_note(sid, "during session")
+    await store.end_session(reason="user")
+
+    # Still editable after end
+    row = await store.upsert_primary_note(sid, "after session")
+    assert row["body"] == "after session"
+
+    fetched = await store.get_primary_note(sid)
+    assert fetched["body"] == "after session"
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_dual_writes_sessions_notes(store, sample_address):
+    """After upsert, the legacy sessions.notes column should match body."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.upsert_primary_note(sid, "legacy body 1")
+    cursor = await store._conn.execute(
+        "SELECT notes FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row["notes"] == "legacy body 1"
+
+    # Update path also dual-writes.
+    await store.upsert_primary_note(sid, "legacy body 2")
+    cursor = await store._conn.execute(
+        "SELECT notes FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row["notes"] == "legacy body 2"
+
+
+@pytest.mark.asyncio
+async def test_get_notes_empty_for_session_without_notes(store, sample_address):
+    """get_notes should return an empty list when no notes exist."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_notes(sid) == []
+
+
+@pytest.mark.asyncio
+async def test_get_notes_returns_all_in_created_at_order(store, sample_address):
+    """get_notes orders by created_at ASC, id ASC; primary note (earliest) first."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Insert two rows directly via SQL so we control created_at precisely,
+    # simulating the eventual multi-note future.
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES (?, ?, ?, ?)",
+        (sid, "2026-04-12T10:00:02+00:00", "2026-04-12T10:00:02+00:00", "second"),
+    )
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES (?, ?, ?, ?)",
+        (sid, "2026-04-12T10:00:01+00:00", "2026-04-12T10:00:01+00:00", "first"),
+    )
+    await store._conn.commit()
+
+    notes = await store.get_notes(sid)
+    assert len(notes) == 2
+    assert notes[0]["body"] == "first"
+    assert notes[1]["body"] == "second"
+
+    # get_primary_note should return the earliest-created row.
+    primary = await store.get_primary_note(sid)
+    assert primary["body"] == "first"

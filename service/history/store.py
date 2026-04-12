@@ -1057,6 +1057,105 @@ class HistoryStore:
             return [self._timer_row_to_dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Session notes CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _note_row_to_dict(row) -> dict:
+        """Convert a ``session_notes`` row to a plain dict."""
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "body": row["body"],
+        }
+
+    async def _fetch_primary_note_locked(self, session_id: str) -> Optional[dict]:
+        """Fetch the earliest-created note row as a dict (must hold ``_lock``)."""
+        cursor = await self._conn.execute(
+            "SELECT id, session_id, created_at, updated_at, body "
+            "FROM session_notes "
+            "WHERE session_id = ? "
+            "ORDER BY created_at ASC, id ASC "
+            "LIMIT 1",
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._note_row_to_dict(row)
+
+    async def get_primary_note(self, session_id: str) -> Optional[dict]:
+        """Return the earliest-created note row for a session, or None.
+
+        The "primary" note is the first one created for a session (lowest
+        ``created_at``, breaking ties by lowest ``id``).  Notes are
+        readable on any session — active or ended.
+        """
+        async with self._lock:
+            return await self._fetch_primary_note_locked(session_id)
+
+    async def upsert_primary_note(self, session_id: str, body: str) -> dict:
+        """Create or update the primary note for a session.
+
+        If no notes row exists, INSERTs one with ``created_at = updated_at = now``.
+        Otherwise UPDATEs the earliest-created row, setting ``body`` and
+        ``updated_at = now`` while preserving ``created_at``.
+
+        Notes remain editable after a session ends (unlike timers), so no
+        active-session guard is applied here.  The legacy ``sessions.notes``
+        column is dual-written to ``body`` for one release cycle of
+        backwards compatibility — if no matching ``sessions`` row exists
+        the FK violation surfaces.
+        """
+        async with self._lock:
+            now_ts = now_iso_utc()
+            existing = await self._fetch_primary_note_locked(session_id)
+
+            if existing is None:
+                await self._conn.execute(
+                    "INSERT INTO session_notes "
+                    "(session_id, created_at, updated_at, body) "
+                    "VALUES (?, ?, ?, ?)",
+                    (session_id, now_ts, now_ts, body),
+                )
+            else:
+                await self._conn.execute(
+                    "UPDATE session_notes "
+                    "SET body = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (body, now_ts, existing["id"]),
+                )
+
+            # Dual-write to the legacy sessions.notes column.
+            await self._conn.execute(
+                "UPDATE sessions SET notes = ? WHERE id = ?",
+                (body, session_id),
+            )
+
+            await self._conn.commit()
+            row = await self._fetch_primary_note_locked(session_id)
+            assert row is not None  # just inserted or updated
+            return row
+
+    async def get_notes(self, session_id: str) -> list[dict]:
+        """Return all notes rows for a session, ordered by created_at ASC, id ASC.
+
+        Empty list if none.  Works for any session, active or ended.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT id, session_id, created_at, updated_at, body "
+                "FROM session_notes "
+                "WHERE session_id = ? "
+                "ORDER BY created_at ASC, id ASC",
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+            return [self._note_row_to_dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
 
