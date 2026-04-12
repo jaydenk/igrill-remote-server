@@ -206,6 +206,19 @@ async def test_migration_v4_creates_session_timers(store):
 
 
 @pytest.mark.asyncio
+async def test_session_timers_session_index_exists(store):
+    """Migration v4 should create idx_session_timers_session for convention parity."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND name='idx_session_timers_session'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, (
+        "idx_session_timers_session index should exist after migration"
+    )
+
+
+@pytest.mark.asyncio
 async def test_session_timers_composite_primary_key(store):
     """session_timers should use (session_id, address, probe_index) as composite PK."""
     # pk column in PRAGMA table_info is column 5 (0-indexed) and is non-zero

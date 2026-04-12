@@ -45,6 +45,7 @@ MIGRATIONS: dict[int, list[str]] = {
             PRIMARY KEY (session_id, address, probe_index)
         )
         """,
+        "CREATE INDEX IF NOT EXISTS idx_session_timers_session ON session_timers(session_id)",
     ],
 }
 

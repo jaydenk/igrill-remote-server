@@ -89,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_probe_readings_lookup ON probe_readings(session_i
 CREATE INDEX IF NOT EXISTS idx_device_readings_session ON device_readings(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_devices_session ON session_devices(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_targets_session ON session_targets(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_timers_session ON session_timers(session_id);
 """
 
 
