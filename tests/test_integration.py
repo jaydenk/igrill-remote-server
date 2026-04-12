@@ -637,7 +637,12 @@ async def test_ws_session_notes_update_active_session(client):
         resp = await client.get(f"/api/sessions/{session_id}")
         assert resp.status == 200
         body = await resp.json()
-        assert body["notes"] == "Low and slow — oak wood."
+        # Legacy string form of the primary note.
+        assert body["notesBody"] == "Low and slow — oak wood."
+        # New notes array form.
+        assert isinstance(body["notes"], list)
+        assert len(body["notes"]) == 1
+        assert body["notes"][0]["body"] == "Low and slow — oak wood."
     finally:
         broadcast_task.cancel()
         try:
@@ -721,7 +726,10 @@ async def test_ws_session_notes_update_after_session_ends(client):
         resp = await client.get(f"/api/sessions/{session_id}")
         assert resp.status == 200
         body = await resp.json()
-        assert body["notes"] == "updated after end"
+        assert body["notesBody"] == "updated after end"
+        assert isinstance(body["notes"], list)
+        assert len(body["notes"]) == 1
+        assert body["notes"][0]["body"] == "updated after end"
     finally:
         broadcast_task.cancel()
         try:
