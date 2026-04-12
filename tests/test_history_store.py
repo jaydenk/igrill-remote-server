@@ -986,3 +986,148 @@ async def test_get_notes_returns_all_in_created_at_order(store, sample_address):
     # get_primary_note should return the earliest-created row.
     primary = await store.get_primary_note(sid)
     assert primary["body"] == "first"
+
+
+# ---------------------------------------------------------------------------
+# discard_session
+# ---------------------------------------------------------------------------
+
+
+async def _count(store, table: str, session_id: str) -> int:
+    cursor = await store._conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE session_id = ?", (session_id,)
+    )
+    row = await cursor.fetchone()
+    return row[0]
+
+
+@pytest.mark.asyncio
+async def test_discard_session_deletes_row_and_cascade(store, sample_address):
+    """discard_session removes the sessions row and every child-table row."""
+    from service.models.session import TargetConfig
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Record a reading -> probe_readings + device_readings
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 72.5}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+
+    # Targets
+    await store.save_targets(
+        sid,
+        sample_address,
+        [TargetConfig(probe_index=1, mode="fixed", target_value=74.0)],
+    )
+
+    # Timer
+    await store.upsert_timer(
+        sid, sample_address, 1, mode="count_down", duration_secs=60
+    )
+
+    # Note
+    await store.upsert_primary_note(sid, "before discard")
+
+    # Sanity — data exists
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_timers", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    assert await _count(store, "session_devices", sid) == 0
+    assert await _count(store, "probe_readings", sid) == 0
+    assert await _count(store, "device_readings", sid) == 0
+    assert await _count(store, "session_targets", sid) == 0
+    assert await _count(store, "session_timers", sid) == 0
+    assert await _count(store, "session_notes", sid) == 0
+
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_discard_session_clears_active_state(store, sample_address):
+    """Discarding the current session clears _current_session_id so further
+    timer/other active-only operations on the old id fail (no-op writes)."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.is_session_active() is True
+    assert await store.get_current_session_id() == sid
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    # Active state cleared
+    assert await store.is_session_active() is False
+    assert await store.get_current_session_id() is None
+
+    state = await store.get_session_state()
+    assert state["current_session_id"] is None
+    assert state["current_session_start_ts"] is None
+
+    # Subsequent active-session operation on the old id must not write.
+    with pytest.raises(ValueError, match="active session"):
+        await store.upsert_timer(
+            sid, sample_address, 1, mode="count_down", duration_secs=60
+        )
+    # Confirm no row was created.
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_discard_session_returns_false_for_unknown_id(store):
+    """Unknown session_id returns False without raising."""
+    result = await store.discard_session("deadbeef" * 4)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_discard_session_on_ended_session(store, sample_address):
+    """Discarding an already-ended session still deletes rows and returns True."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 70.0}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+    await store.upsert_primary_note(sid, "done")
+    await store.end_session(reason="user")
+
+    # End clears active state already.
+    assert await store.get_current_session_id() is None
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    assert await _count(store, "session_devices", sid) == 0
+    assert await _count(store, "probe_readings", sid) == 0
+    assert await _count(store, "device_readings", sid) == 0
+    assert await _count(store, "session_notes", sid) == 0
+
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
