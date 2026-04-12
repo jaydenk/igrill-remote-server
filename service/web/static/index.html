@@ -1444,65 +1444,11 @@
 <!-- ================================================================== -->
 <div class="tab-content" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings">
 
-  <!-- Connected Devices -->
+  <!-- Connected Devices (most actionable — shown first) -->
   <section class="settings-section">
     <div class="settings-section-title">Connected Devices</div>
     <div id="settingsDeviceList">
       <p class="settings-no-devices">No devices discovered yet.</p>
-    </div>
-  </section>
-
-  <!-- Server Info -->
-  <section class="settings-section">
-    <div class="settings-section-title">Server Information</div>
-    <div id="settingsServerInfo">
-      <div class="settings-row">
-        <span class="settings-label">Uptime</span>
-        <span class="settings-value" id="settingsUptime">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Poll Interval</span>
-        <span class="settings-value" id="settingsPollInterval">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Scan Interval</span>
-        <span class="settings-value" id="settingsScanInterval">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Devices Total</span>
-        <span class="settings-value" id="settingsDevicesTotal">&mdash;</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">Devices Connected</span>
-        <span class="settings-value" id="settingsDevicesConnected">&mdash;</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- Log Level Controls -->
-  <section class="settings-section">
-    <div class="settings-section-title">Log Levels</div>
-    <div id="settingsLogLevels">
-      <div class="log-level-row" data-logger="igrill.ble">
-        <span class="log-logger-name">igrill.ble</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.ws">
-        <span class="log-logger-name">igrill.ws</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.session">
-        <span class="log-logger-name">igrill.session</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.alert">
-        <span class="log-logger-name">igrill.alert</span>
-        <select></select>
-      </div>
-      <div class="log-level-row" data-logger="igrill.http">
-        <span class="log-logger-name">igrill.http</span>
-        <select></select>
-      </div>
     </div>
   </section>
 
@@ -1530,8 +1476,62 @@
           </select>
         </div>
       </div>
-      <button class="btn btn-primary" id="btnSimToggle">Start Simulation</button>
+      <button class="btn btn-brand" id="btnSimToggle">Start Simulation</button>
       <div id="simFlash" style="display:none; font-size:0.82rem; margin-top:0.5rem;"></div>
+    </div>
+  </section>
+
+  <!-- Log Level Controls (least common — shown alongside diagnostics) -->
+  <section class="settings-section">
+    <div class="settings-section-title">Log Levels</div>
+    <div id="settingsLogLevels">
+      <div class="log-level-row" data-logger="igrill.ble">
+        <span class="log-logger-name">igrill.ble</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.ws">
+        <span class="log-logger-name">igrill.ws</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.session">
+        <span class="log-logger-name">igrill.session</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.alert">
+        <span class="log-logger-name">igrill.alert</span>
+        <select></select>
+      </div>
+      <div class="log-level-row" data-logger="igrill.http">
+        <span class="log-logger-name">igrill.http</span>
+        <select></select>
+      </div>
+    </div>
+  </section>
+
+  <!-- Server Info (diagnostic — shown last) -->
+  <section class="settings-section">
+    <div class="settings-section-title">Server Information</div>
+    <div id="settingsServerInfo">
+      <div class="settings-row">
+        <span class="settings-label">Uptime</span>
+        <span class="settings-value" id="settingsUptime">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Poll Interval</span>
+        <span class="settings-value" id="settingsPollInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Scan Interval</span>
+        <span class="settings-value" id="settingsScanInterval">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Total</span>
+        <span class="settings-value" id="settingsDevicesTotal">&mdash;</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Devices Connected</span>
+        <span class="settings-value" id="settingsDevicesConnected">&mdash;</span>
+      </div>
     </div>
   </section>
 </div>
@@ -2906,6 +2906,8 @@
     renderSessionBanner();
     /* Keep IdleCookView (Task 4) in sync with legacy device/probe state. */
     if (typeof renderIdleCookView === "function") renderIdleCookView();
+    /* Keep the Settings > Connected Devices list live (Task 13). */
+    if (typeof refreshSettingsDevices === "function") refreshSettingsDevices();
 
     /* Append to charts if session is active */
     if (session.id != null && payload.data) {
@@ -2979,6 +2981,8 @@
       deviceBleStates[address] = state;
       renderDevices();
       if (typeof renderIdleCookView === "function") renderIdleCookView();
+      /* Keep the Settings > Connected Devices list live (Task 13). */
+      if (typeof refreshSettingsDevices === "function") refreshSettingsDevices();
     }
   }
 
