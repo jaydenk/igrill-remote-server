@@ -47,6 +47,27 @@ MIGRATIONS: dict[int, list[str]] = {
         """,
         "CREATE INDEX IF NOT EXISTS idx_session_timers_session ON session_timers(session_id)",
     ],
+    5: [
+        """
+        CREATE TABLE IF NOT EXISTS session_notes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            body        TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_session_notes_session ON session_notes(session_id, created_at)",
+        # Backfill: promote any existing non-empty sessions.notes values into
+        # their own session_notes row. The sessions.notes column is intentionally
+        # preserved for one release cycle and will be dropped in a later migration.
+        """
+        INSERT INTO session_notes (session_id, created_at, updated_at, body)
+        SELECT id, started_at, started_at, notes
+        FROM sessions
+        WHERE notes IS NOT NULL AND notes != ''
+        """,
+    ],
 }
 
 
