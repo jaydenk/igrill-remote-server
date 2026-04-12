@@ -71,6 +71,19 @@ CREATE TABLE IF NOT EXISTS session_targets (
     PRIMARY KEY (session_id, address, probe_index)
 );
 
+CREATE TABLE IF NOT EXISTS session_timers (
+    session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    address          TEXT NOT NULL,
+    probe_index      INTEGER NOT NULL,
+    mode             TEXT NOT NULL,
+    duration_secs    INTEGER,
+    started_at       TEXT,
+    paused_at        TEXT,
+    accumulated_secs INTEGER NOT NULL DEFAULT 0,
+    completed_at     TEXT,
+    PRIMARY KEY (session_id, address, probe_index)
+);
+
 CREATE INDEX IF NOT EXISTS idx_probe_readings_session ON probe_readings(session_id);
 CREATE INDEX IF NOT EXISTS idx_probe_readings_lookup ON probe_readings(session_id, address, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_device_readings_session ON device_readings(session_id);

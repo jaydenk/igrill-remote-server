@@ -30,6 +30,22 @@ MIGRATIONS: dict[int, list[str]] = {
         )
         """,
     ],
+    4: [
+        """
+        CREATE TABLE IF NOT EXISTS session_timers (
+            session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            address          TEXT NOT NULL,
+            probe_index      INTEGER NOT NULL,
+            mode             TEXT NOT NULL,
+            duration_secs    INTEGER,
+            started_at       TEXT,
+            paused_at        TEXT,
+            accumulated_secs INTEGER NOT NULL DEFAULT 0,
+            completed_at     TEXT,
+            PRIMARY KEY (session_id, address, probe_index)
+        )
+        """,
+    ],
 }
 
 

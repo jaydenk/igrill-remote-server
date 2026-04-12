@@ -158,7 +158,7 @@ async def test_partial_migration_rolls_back(tmp_db):
 
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             row = await cursor.fetchone()
-            assert row[0] == 3
+            assert row[0] == 4
     finally:
         MIGRATIONS.clear()
         MIGRATIONS.update(original)
@@ -177,3 +177,96 @@ async def test_migration_v3_creates_push_tokens(store):
     async with store._conn.execute("PRAGMA table_info(push_tokens)") as cursor:
         columns = {r[1] for r in await cursor.fetchall()}
     assert columns == {"token", "live_activity_token", "created_at", "updated_at"}
+
+
+@pytest.mark.asyncio
+async def test_migration_v4_creates_session_timers(store):
+    """Migration v4 should create the session_timers table with expected columns."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_timers'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "session_timers table should exist after migration"
+
+    # Verify columns
+    async with store._conn.execute("PRAGMA table_info(session_timers)") as cursor:
+        rows = await cursor.fetchall()
+    columns = {r[1] for r in rows}
+    assert columns == {
+        "session_id",
+        "address",
+        "probe_index",
+        "mode",
+        "duration_secs",
+        "started_at",
+        "paused_at",
+        "accumulated_secs",
+        "completed_at",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_timers_composite_primary_key(store):
+    """session_timers should use (session_id, address, probe_index) as composite PK."""
+    # pk column in PRAGMA table_info is column 5 (0-indexed) and is non-zero
+    # for columns participating in the primary key, ordered by their position.
+    async with store._conn.execute("PRAGMA table_info(session_timers)") as cursor:
+        rows = await cursor.fetchall()
+    pk_cols = sorted(
+        ((r[5], r[1]) for r in rows if r[5] > 0),
+        key=lambda item: item[0],
+    )
+    assert [name for _, name in pk_cols] == ["session_id", "address", "probe_index"]
+
+    # Behaviourally: a duplicate (session_id, address, probe_index) must fail.
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('st-sess', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_timers "
+        "(session_id, address, probe_index, mode, accumulated_secs) "
+        "VALUES ('st-sess', 'AA:BB:CC', 0, 'count_up', 0)"
+    )
+    await store._conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        await store._conn.execute(
+            "INSERT INTO session_timers "
+            "(session_id, address, probe_index, mode, accumulated_secs) "
+            "VALUES ('st-sess', 'AA:BB:CC', 0, 'count_down', 0)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_timers_cascade_delete(store):
+    """Deleting a session should cascade-delete its session_timers rows."""
+    # Sanity: foreign keys are enabled by HistoryStore.connect().
+    async with store._conn.execute("PRAGMA foreign_keys") as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == 1, "foreign_keys PRAGMA should be ON"
+
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('cascade-sess', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_timers "
+        "(session_id, address, probe_index, mode, duration_secs, accumulated_secs) "
+        "VALUES ('cascade-sess', 'AA:BB:CC', 0, 'count_down', 600, 0)"
+    )
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = 'cascade-sess'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == 1
+
+    await store._conn.execute("DELETE FROM sessions WHERE id = 'cascade-sess'")
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = 'cascade-sess'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == 0, (
+            "session_timers rows should cascade-delete when parent session is deleted"
+        )
