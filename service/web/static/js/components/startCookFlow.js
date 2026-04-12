@@ -44,7 +44,7 @@
   var STYLE_ID = "scf-styles";
   var STYLE_CSS = [
     ".scf-root{position:fixed;inset:0;z-index:95;display:flex;align-items:center;justify-content:center;font-family:inherit;}",
-    ".scf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);}",
+    ".scf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);}",
     ".scf-card{position:relative;background:var(--bg-secondary,#16213e);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:var(--radius,10px);padding:1.25rem;width:min(92vw,480px);max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.55);}",
     ".scf-steps{display:flex;gap:0.4rem;margin-bottom:0.9rem;}",
     ".scf-step-pip{flex:1;height:4px;border-radius:2px;background:var(--border,#2a2a4a);}",

@@ -32,7 +32,7 @@
   var STYLE_ID = "esf-styles";
   var STYLE_CSS = [
     ".esf-root{position:fixed;inset:0;z-index:96;display:flex;align-items:center;justify-content:center;font-family:inherit;}",
-    ".esf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);}",
+    ".esf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);}",
     ".esf-card{position:relative;background:var(--bg-secondary,#16213e);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:var(--radius,10px);padding:1.25rem;width:min(92vw,440px);box-shadow:0 20px 60px rgba(0,0,0,0.55);}",
     ".esf-title{font-size:1.05rem;font-weight:600;margin-bottom:0.35rem;}",
     ".esf-subtitle{font-size:0.9rem;color:var(--text-secondary,#a0a0b8);margin-bottom:1rem;line-height:1.35;}",

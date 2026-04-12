@@ -24,9 +24,10 @@
       --text-primary: #e0e0e0;
       --text-secondary: #a0a0b8;
       --text-muted: #6c6c80;
-      --accent: #e94560;
-      --brand: #935240;
+      --accent: #e94560;              /* Legacy accent; prefer --brand for primary actions. */
+      --brand: #935240;                /* Primary brand colour. WCAG AA vs #fff: 4.83:1 (passes normal text). */
       --brand-tint: rgba(147, 82, 64, 0.18);
+      --brand-hover: #a46352;          /* Brand lightened ~8% for hover. */
       --green: #4ade80;
       --red: #f87171;
       --yellow: #fbbf24;
@@ -105,6 +106,8 @@
 
     .tab-btn {
       flex: 1;
+      /* min-height 44px satisfies iOS tap-target guidance. */
+      min-height: 44px;
       padding: 0.75rem 1rem;
       background: none;
       border: none;
@@ -162,6 +165,11 @@
     .btn-brand {
       background: var(--brand);
       color: #fff;
+    }
+
+    .btn-brand:hover {
+      background: var(--brand-hover);
+      opacity: 1;
     }
 
     .btn-brand:focus-visible {
@@ -475,6 +483,8 @@
       align-items: center;
       justify-content: center;
       gap: 0.4rem;
+      /* min-height 44px satisfies the iOS HIG / WCAG tap-target guideline. */
+      min-height: 44px;
       padding: 0.6rem 1.25rem;
       border: none;
       border-radius: 6px;
@@ -493,9 +503,17 @@
       cursor: not-allowed;
     }
 
+    /* btn-primary now maps to the brand colour to keep primary actions
+       consistent across Cook Start, Start Session, Start Simulation, etc.
+       Kept --accent available for legacy/tertiary highlights. */
     .btn-primary {
-      background: var(--accent);
+      background: var(--brand);
       color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--brand-hover);
+      opacity: 1;
     }
 
     .btn-danger {
@@ -782,7 +800,7 @@
     }
 
     .session-card.selected {
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .session-card-date {
@@ -1053,7 +1071,7 @@
 
     .log-level-row select:focus {
       outline: none;
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .log-level-row select.flash-success {
@@ -1091,7 +1109,7 @@
 
     .sim-field select:focus {
       outline: none;
-      border-color: var(--accent);
+      border-color: var(--brand);
     }
 
     .sim-field select:disabled {
@@ -1178,9 +1196,9 @@
     }
 
     .device-check input[type="checkbox"] {
-      accent-color: var(--accent);
-      width: 16px;
-      height: 16px;
+      accent-color: var(--brand);
+      width: 18px;
+      height: 18px;
     }
 
     .device-check label {
@@ -3807,7 +3825,7 @@
 
   function updateSimUI() {
     btnSimToggle.textContent = simRunning ? "Stop Simulation" : "Start Simulation";
-    btnSimToggle.className = simRunning ? "btn btn-danger" : "btn btn-primary";
+    btnSimToggle.className = simRunning ? "btn btn-danger" : "btn btn-brand";
     simProbesSelect.disabled = simRunning;
     simSpeedSelect.disabled = simRunning;
   }

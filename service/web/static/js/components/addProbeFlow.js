@@ -44,7 +44,7 @@
   var STYLE_ID = "apf-styles";
   var STYLE_CSS = [
     ".apf-root{position:fixed;inset:0;z-index:96;display:flex;align-items:center;justify-content:center;font-family:inherit;}",
-    ".apf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);}",
+    ".apf-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);}",
     ".apf-card{position:relative;background:var(--bg-secondary,#16213e);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:var(--radius,10px);padding:1.25rem;width:min(92vw,460px);max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.55);}",
     ".apf-title{font-size:1.05rem;font-weight:600;margin-bottom:0.25rem;}",
     ".apf-subtitle{font-size:0.85rem;color:var(--text-secondary,#a0a0b8);margin-bottom:1rem;}",

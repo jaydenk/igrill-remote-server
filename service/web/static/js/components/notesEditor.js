@@ -42,7 +42,7 @@
   var STYLE_ID = "ne-styles";
   var STYLE_CSS = [
     ".ne-root{position:fixed;inset:0;z-index:97;display:flex;align-items:center;justify-content:center;font-family:inherit;}",
-    ".ne-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);}",
+    ".ne-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);}",
     ".ne-card{position:relative;background:var(--bg-secondary,#16213e);color:var(--text-primary,#e0e0e0);border:1px solid var(--border,#2a2a4a);border-radius:var(--radius,10px);padding:1.25rem;width:min(92vw,560px);max-height:90vh;display:flex;flex-direction:column;gap:0.75rem;box-shadow:0 20px 60px rgba(0,0,0,0.55);}",
     ".ne-title{font-size:1.05rem;font-weight:600;}",
     ".ne-subtitle{font-size:0.85rem;color:var(--text-secondary,#a0a0b8);}",
