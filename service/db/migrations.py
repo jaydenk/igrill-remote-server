@@ -68,6 +68,9 @@ MIGRATIONS: dict[int, list[str]] = {
         WHERE notes IS NOT NULL AND notes != ''
         """,
     ],
+    6: [
+        "ALTER TABLE sessions ADD COLUMN target_duration_secs INTEGER",
+    ],
 }
 
 

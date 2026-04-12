@@ -158,7 +158,7 @@ async def test_partial_migration_rolls_back(tmp_db):
 
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             row = await cursor.fetchone()
-            assert row[0] == 5
+            assert row[0] == 6
     finally:
         MIGRATIONS.clear()
         MIGRATIONS.update(original)
@@ -441,3 +441,32 @@ async def test_migration_v5_preserves_sessions_notes_column(store):
     async with store._conn.execute("PRAGMA table_info(sessions)") as cursor:
         cols = {r[1] for r in await cursor.fetchall()}
     assert "notes" in cols, "sessions.notes column should still exist after v5"
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_adds_target_duration_secs(store):
+    """Migration v6 should add a nullable INTEGER target_duration_secs column to sessions."""
+    async with store._conn.execute("PRAGMA table_info(sessions)") as cursor:
+        rows = await cursor.fetchall()
+    # row = (cid, name, type, notnull, dflt_value, pk)
+    columns = {r[1]: r for r in rows}
+    assert "target_duration_secs" in columns, (
+        "sessions.target_duration_secs column should exist after migration v6"
+    )
+    col = columns["target_duration_secs"]
+    assert col[2].upper() == "INTEGER", (
+        f"target_duration_secs should be INTEGER, got {col[2]!r}"
+    )
+    assert col[3] == 0, "target_duration_secs should be nullable (notnull=0)"
+
+    # Behavioural check: NULL inserts must be permitted.
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('td-null', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.commit()
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = 'td-null'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] is None
