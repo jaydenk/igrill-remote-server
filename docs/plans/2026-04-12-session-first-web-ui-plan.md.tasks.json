@@ -1,0 +1,22 @@
+{
+  "planPath": "docs/plans/2026-04-12-session-first-web-ui-plan.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Prep", "status": "pending"},
+    {"id": 1, "subject": "Task 1: SessionStore context", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 2: RollingBuffer module", "status": "pending", "blockedBy": [0]},
+    {"id": 3, "subject": "Task 3: Three-tab layout", "status": "pending", "blockedBy": [1]},
+    {"id": 4, "subject": "Task 4: IdleCookView", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 5, "subject": "Task 5: ProbeTargetConfigSheet modal", "status": "pending", "blockedBy": [3]},
+    {"id": 6, "subject": "Task 6: Start Cook flow", "status": "pending", "blockedBy": [4, 5]},
+    {"id": 7, "subject": "Task 7: ActiveSessionView skeleton", "status": "pending", "blockedBy": [6]},
+    {"id": 8, "subject": "Task 8: Probe cards with timer UI", "status": "pending", "blockedBy": [7]},
+    {"id": 9, "subject": "Task 9: Add Probe mid-session", "status": "pending", "blockedBy": [5, 7]},
+    {"id": 10, "subject": "Task 10: Notes", "status": "pending", "blockedBy": [7]},
+    {"id": 11, "subject": "Task 11: End Session modal", "status": "pending", "blockedBy": [7]},
+    {"id": 12, "subject": "Task 12: History tab refinement", "status": "pending", "blockedBy": [10, 11]},
+    {"id": 13, "subject": "Task 13: Settings tab", "status": "pending", "blockedBy": [3]},
+    {"id": 14, "subject": "Task 14: Visual pass", "status": "pending", "blockedBy": [4, 7, 12, 13]},
+    {"id": 15, "subject": "Task 15: Final verification", "status": "pending", "blockedBy": [14]}
+  ],
+  "lastUpdated": "2026-04-12T00:00:00Z"
+}

@@ -1,0 +1,26 @@
+{
+  "planPath": "docs/plans/2026-04-12-session-first-server-plan.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Prep", "status": "pending"},
+    {"id": 1, "subject": "Task 1: Migration — session_timers table", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 2: Migration — session_notes table + backfill", "status": "pending", "blockedBy": [0]},
+    {"id": 3, "subject": "Task 3: Migration — sessions.target_duration_secs", "status": "pending", "blockedBy": [0]},
+    {"id": 4, "subject": "Task 4: HistoryStore — timer CRUD", "status": "pending", "blockedBy": [1]},
+    {"id": 5, "subject": "Task 5: HistoryStore — notes CRUD", "status": "pending", "blockedBy": [2]},
+    {"id": 6, "subject": "Task 6: HistoryStore — discard_session", "status": "pending", "blockedBy": [1, 2, 3]},
+    {"id": 7, "subject": "Task 7: Alert evaluator — clear state on discard", "status": "pending", "blockedBy": [6]},
+    {"id": 8, "subject": "Task 8: Envelope — new message types registered", "status": "pending", "blockedBy": [0]},
+    {"id": 9, "subject": "Task 9: WebSocket handler — session_discard_request", "status": "pending", "blockedBy": [6, 7, 8]},
+    {"id": 10, "subject": "Task 10: WebSocket handler — probe_timer_request", "status": "pending", "blockedBy": [4, 8]},
+    {"id": 11, "subject": "Task 11: WebSocket handler — session_notes_update_request", "status": "pending", "blockedBy": [5, 8]},
+    {"id": 12, "subject": "Task 12: Countdown auto-completion broadcast", "status": "pending", "blockedBy": [10]},
+    {"id": 13, "subject": "Task 13: Extend session_start_request with target_duration_secs", "status": "pending", "blockedBy": [3]},
+    {"id": 14, "subject": "Task 14: Session export — include timers + notes + target duration", "status": "pending", "blockedBy": [4, 5, 13]},
+    {"id": 15, "subject": "Task 15: Rate limiter — include new session-control messages", "status": "pending", "blockedBy": [9, 10, 11]},
+    {"id": 16, "subject": "Task 16: Orphaned session recovery — discarded state", "status": "pending", "blockedBy": [6]},
+    {"id": 17, "subject": "Task 17: End-to-end integration test", "status": "pending", "blockedBy": [9, 10, 11, 12, 13, 14, 15, 16]},
+    {"id": 18, "subject": "Task 18: Documentation updates", "status": "pending", "blockedBy": [17]},
+    {"id": 19, "subject": "Task 19: Final verification", "status": "pending", "blockedBy": [18]}
+  ],
+  "lastUpdated": "2026-04-12T00:00:00Z"
+}
