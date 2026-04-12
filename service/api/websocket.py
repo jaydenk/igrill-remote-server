@@ -32,6 +32,12 @@ _SESSION_CONTROL_TYPES = frozenset({
     "session_add_device_request",
     "session_update_request",
     "target_update_request",
+    # Session-first redesign request types (handlers wired in Tasks 9-11).
+    # Listed here so they share the session-control rate limit even before
+    # their handlers exist; unknown types still fall through to "unknown_type".
+    "session_discard_request",
+    "probe_timer_request",
+    "session_notes_update_request",
 })
 
 
