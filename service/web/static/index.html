@@ -872,6 +872,82 @@
       flex-wrap: wrap;
     }
 
+    .history-detail-header .detail-actions {
+      margin-top: 0.75rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .history-detail-header .detail-notes-body {
+      color: var(--text-secondary);
+      font-style: italic;
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+    }
+
+    .history-timers {
+      margin-top: 1rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius, 10px);
+      padding: 0.75rem 1rem;
+    }
+
+    .history-timers-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+
+    .history-timers-empty {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .history-timer-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      padding: 0.3rem 0;
+      font-size: 0.9rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .history-timer-row:first-of-type {
+      border-top: none;
+    }
+
+    .history-timer-row .timer-probe {
+      font-weight: 500;
+      min-width: 9ch;
+    }
+
+    .history-timer-row .timer-mode {
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+    }
+
+    .history-timer-row .timer-time {
+      font-variant-numeric: tabular-nums;
+      margin-left: auto;
+      font-weight: 500;
+    }
+
+    .history-timer-row .timer-badge {
+      font-size: 0.7rem;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      background: var(--green, #4ade80);
+      color: #0b2410;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
     .history-empty {
       text-align: center;
       padding: 3rem 1rem;
@@ -885,15 +961,18 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 1rem 1.25rem;
+      border-top: 3px solid var(--brand);
     }
 
     .settings-section-title {
-      font-size: 0.75rem;
-      font-weight: 600;
+      font-size: 0.78rem;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--text-muted);
-      margin-bottom: 0.75rem;
+      letter-spacing: 0.09em;
+      color: var(--brand);
+      margin-bottom: 0.85rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
     }
 
     .settings-row {
@@ -1344,6 +1423,10 @@
     <div class="history-detail-pane hidden" id="historyDetailPane">
       <button class="btn btn-ghost history-back-btn" id="historyBackBtn">&larr; Back to list</button>
       <div class="history-detail-header" id="historyDetailHeader"></div>
+      <div class="history-timers" id="historyTimersSection" style="display:none;">
+        <div class="history-timers-title">Timers</div>
+        <div id="historyTimersList"></div>
+      </div>
       <div class="section-title">Temperature Charts</div>
       <div class="chart-container" id="historyCombinedChartContainer">
         <div class="chart-title">All Probes</div>
@@ -2696,10 +2779,79 @@
         handleTargetAlert(payload, "exceeded");
         break;
 
+      case "session_discarded":
+        handleSessionDiscarded(payload);
+        break;
+
+      case "session_notes_update":
+        handleSessionNotesUpdate(payload);
+        break;
+
       case "error":
         console.warn("[iGrill] Server error:", payload.code, payload.message);
         break;
     }
+  }
+
+  /** Purge any local references to a discarded session.
+   *  Discarded sessions are filtered out server-side on list fetches,
+   *  but a client that's currently showing one in the History tab must
+   *  drop the card + detail view so the UI doesn't reference a ghost
+   *  session. */
+  function handleSessionDiscarded(payload) {
+    var discardedId = payload && payload.sessionId;
+    if (!discardedId) return;
+
+    /* Remove the card for this session if it's in the list. */
+    var card = historySessionList.querySelector(
+      '.session-card[data-session-id="' + cssEscape(discardedId) + '"]'
+    );
+    if (card && card.parentNode) {
+      card.parentNode.removeChild(card);
+    }
+    if (historySessionList.querySelectorAll(".session-card").length === 0) {
+      historyEmpty.style.display = "";
+    }
+
+    /* If we're currently viewing this session's detail, bail back to
+     * the list and drop the cached payload. */
+    if (selectedHistorySessionId === discardedId) {
+      if (historyNotesEditor) {
+        try { historyNotesEditor.close(); } catch (_) { /* no-op */ }
+        historyNotesEditor = null;
+      }
+      historyDetailCache = null;
+      showHistoryList();
+    }
+  }
+
+  /** When a `session_notes_update` broadcast fires, refresh the
+   *  cached detail + open editor so multi-client edits stay coherent. */
+  function handleSessionNotesUpdate(payload) {
+    if (!payload) return;
+    /* The broadcast reuses the raw `session_notes` row shape which is
+     * snake_case (`session_id`). The ack/handler variant camel-cases
+     * elsewhere — accept both to be resilient. */
+    var sid = payload.session_id || payload.sessionId;
+    var body = typeof payload.body === "string" ? payload.body : null;
+    if (!sid || body == null) return;
+
+    if (historyDetailCache && historyDetailCache.sessionId === sid) {
+      historyDetailCache.notesBody = body;
+      renderHistoryDetailHeader(historyDetailCache, historyDetailCache);
+    }
+    if (historyNotesEditor && historyNotesEditor.sessionId === sid) {
+      try { historyNotesEditor.setBody(body); } catch (_) { /* no-op */ }
+    }
+  }
+
+  /** Minimal CSS.escape polyfill for attribute selectors (Safari <10
+   *  has it, but sessionId strings are ULIDs so cheap to sanitise). */
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function handleStatus(payload) {
@@ -2854,10 +3006,19 @@
   var historyCombinedChartWrapper = document.getElementById("historyCombinedChartWrapper");
   var historyPerProbeChartsEl    = document.getElementById("historyPerProbeCharts");
   var historySummaryGrid    = document.getElementById("historySummaryGrid");
+  var historyTimersSection  = document.getElementById("historyTimersSection");
+  var historyTimersList     = document.getElementById("historyTimersList");
 
   var historyCombinedChart  = null;
   var historyPerProbeCharts = {};
   var selectedHistorySessionId = null;
+  /* Cached detail payload for the currently selected session so the
+   * Edit Notes action and discard purging can re-render without a
+   * refetch. */
+  var historyDetailCache = null;
+  /* Reference to an open NotesEditor instance for the history tab so
+   * we can push external updates / close on discard. */
+  var historyNotesEditor = null;
 
   historyBackBtn.addEventListener("click", function () {
     showHistoryList();
@@ -2891,6 +3052,96 @@
     historyCombinedChartWrapper.textContent = "";
     historyPerProbeChartsEl.textContent = "";
     historySummaryGrid.textContent = "";
+    historyTimersList.textContent = "";
+    historyTimersSection.style.display = "none";
+  }
+
+  /** Format a duration in seconds as "1h 30m" / "45m" / "30s". */
+  function formatHmsDuration(secs) {
+    if (secs == null || !isFinite(secs)) return "\u2014";
+    secs = Math.max(0, Math.floor(secs));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    var parts = [];
+    if (h > 0) parts.push(h + "h");
+    if (m > 0) parts.push(m + "m");
+    if (h === 0 && m === 0) parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  /** Total elapsed seconds for a completed session (endTs - startTs). */
+  function sessionElapsedSecs(startIso, endIso) {
+    if (!startIso) return null;
+    var start = new Date(startIso);
+    var end = endIso ? new Date(endIso) : new Date();
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+    return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+  }
+
+  /** Compute the completed-timer display value (mode-aware).
+   *  For count_up: show `accumulatedSecs`.
+   *  For count_down: show `durationSecs` (the timer completed when it
+   *  drained to zero — "30:00 countdown" feels more truthful than
+   *  "00:00"). */
+  function historyTimerDisplaySecs(timer) {
+    var acc = timer.accumulatedSecs || 0;
+    if (timer.mode === "count_down") {
+      return timer.durationSecs || 0;
+    }
+    return acc;
+  }
+
+  /** "HH:MM:SS" / "MM:SS" padded. */
+  function formatTabularTime(secs) {
+    if (secs == null || !isFinite(secs)) return "--:--";
+    secs = Math.max(0, Math.floor(secs));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    if (h > 0) return h + ":" + pad(m) + ":" + pad(s);
+    return pad(m) + ":" + pad(s);
+  }
+
+  function timerModeLabel(mode) {
+    if (mode === "count_down") return "Countdown";
+    if (mode === "count_up") return "Count-up";
+    return mode || "Timer";
+  }
+
+  /** Resolve a probe label from the session's targets list (or fall
+   *  back to "Probe N"). */
+  function probeLabelFromTargets(probeIndex, targets) {
+    if (targets) {
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i].probe_index === probeIndex && targets[i].label) {
+          return targets[i].label + " (Probe " + probeIndex + ")";
+        }
+      }
+    }
+    return "Probe " + probeIndex;
+  }
+
+  function renderHistoryTimers(timers, targets) {
+    historyTimersList.textContent = "";
+    if (!timers || timers.length === 0) {
+      historyTimersSection.style.display = "none";
+      return;
+    }
+    historyTimersSection.style.display = "";
+    timers.forEach(function (t) {
+      var row = el("div", "history-timer-row");
+      row.appendChild(el("span", "timer-probe",
+        probeLabelFromTargets(t.probeIndex, targets)));
+      row.appendChild(el("span", "timer-mode", timerModeLabel(t.mode)));
+      row.appendChild(el("span", "timer-time",
+        formatTabularTime(historyTimerDisplaySecs(t))));
+      if (t.completedAt) {
+        row.appendChild(el("span", "timer-badge", "Completed"));
+      }
+      historyTimersList.appendChild(row);
+    });
   }
 
   function formatHistoryDate(isoString) {
@@ -3006,31 +3257,13 @@
   function loadHistoryDetail(sessionId, sessionMeta) {
     destroyHistoryCharts();
     showHistoryDetail();
+    historyDetailCache = null;
 
-    /* Render header */
-    historyDetailHeader.textContent = "";
-    var detailTitle = sessionMeta.name || "Session";
-    var h3 = el("h3", null, detailTitle + " \u2014 " + formatHistoryDate(sessionMeta.startTs));
-    historyDetailHeader.appendChild(h3);
-
-    if (sessionMeta.notes) {
-      var notesP = el("p", null, sessionMeta.notes);
-      notesP.style.cssText = "color:var(--text-secondary); font-style:italic; margin-top:0.5rem; font-size:0.9rem;";
-      historyDetailHeader.appendChild(notesP);
-    }
-
-    var metaDiv = el("div", "detail-meta");
-    metaDiv.appendChild(el("span", null, "Duration: " + formatHistoryDuration(sessionMeta.startTs, sessionMeta.endTs)));
-    if (sessionMeta.endReason) {
-      metaDiv.appendChild(el("span", null, "End reason: " + sessionMeta.endReason));
-    }
-    if (sessionMeta.devices && sessionMeta.devices.length > 0) {
-      var devNames = sessionMeta.devices.map(function (d) {
-        return d.name || d.address;
-      }).join(", ");
-      metaDiv.appendChild(el("span", null, "Devices: " + devNames));
-    }
-    historyDetailHeader.appendChild(metaDiv);
+    /* Render a provisional header from the list payload so the user
+     * sees something immediately. The detail fetch will replace this
+     * with the enriched version (notesBody, targetDurationSecs,
+     * timers). */
+    renderHistoryDetailHeader(sessionMeta, null);
 
     /* Fetch full session data */
     fetch("/api/sessions/" + encodeURIComponent(sessionId))
@@ -3039,12 +3272,134 @@
         return resp.json();
       })
       .then(function (data) {
+        /* Merge list metadata with detail payload so we keep endTs /
+         * endReason fields the detail endpoint doesn't echo back. */
+        var merged = {
+          sessionId: data.sessionId || sessionId,
+          name: data.name != null ? data.name : sessionMeta.name,
+          startTs: sessionMeta.startTs,
+          endTs: sessionMeta.endTs,
+          endReason: sessionMeta.endReason,
+          devices: data.devices || sessionMeta.devices || [],
+          notesBody: data.notesBody != null
+            ? data.notesBody
+            : (sessionMeta.notes || null),
+          targetDurationSecs: data.targetDurationSecs != null
+            ? data.targetDurationSecs
+            : null,
+          timers: data.timers || [],
+          targets: data.targets || [],
+        };
+        historyDetailCache = merged;
+        renderHistoryDetailHeader(merged, merged);
+        renderHistoryTimers(merged.timers, merged.targets);
         renderHistoryCharts(data);
       })
       .catch(function (err) {
         console.warn("[iGrill] Failed to fetch session detail:", err);
         historyDetailHeader.appendChild(el("p", "history-empty", "Failed to load session data."));
       });
+  }
+
+  /** Render the history detail header.
+   *  `meta` comes from the list payload (has `name`, `startTs`,
+   *  `endTs`, `notes`, `endReason`, `devices`). `detail` — when
+   *  provided — is the enriched `/api/sessions/{id}` payload and
+   *  carries `notesBody`, `targetDurationSecs`. */
+  function renderHistoryDetailHeader(meta, detail) {
+    historyDetailHeader.textContent = "";
+
+    var detailTitle = meta.name || "Session";
+    historyDetailHeader.appendChild(
+      el("h3", null, detailTitle + " \u2014 " + formatHistoryDate(meta.startTs))
+    );
+
+    /* Notes body: prefer the enriched `notesBody`, fall back to list
+     * `notes` preview. Render as a paragraph preserving line breaks. */
+    var notesBody = detail && detail.notesBody != null
+      ? detail.notesBody
+      : (meta.notes || null);
+    if (notesBody) {
+      historyDetailHeader.appendChild(
+        el("p", "detail-notes-body", notesBody)
+      );
+    }
+
+    var metaDiv = el("div", "detail-meta");
+    var elapsedSecs = sessionElapsedSecs(meta.startTs, meta.endTs);
+    metaDiv.appendChild(el("span", null,
+      "Elapsed: " + formatHmsDuration(elapsedSecs)));
+    if (detail && detail.targetDurationSecs != null) {
+      metaDiv.appendChild(el("span", null,
+        "Target: " + formatHmsDuration(detail.targetDurationSecs)));
+    }
+    if (meta.endReason) {
+      metaDiv.appendChild(el("span", null, "End reason: " + meta.endReason));
+    }
+    if (meta.devices && meta.devices.length > 0) {
+      var devNames = meta.devices.map(function (d) {
+        return d.name || d.address;
+      }).join(", ");
+      metaDiv.appendChild(el("span", null, "Devices: " + devNames));
+    }
+    historyDetailHeader.appendChild(metaDiv);
+
+    /* Action row: Edit notes (only when we have the full detail —
+     * otherwise we can't guarantee the payload we'll post back has
+     * been sourced from the server). */
+    if (detail) {
+      var actions = el("div", "detail-actions");
+      var editBtn = el("button", "btn btn-ghost", "Edit notes");
+      editBtn.type = "button";
+      editBtn.addEventListener("click", function () {
+        openHistoryNotesEditor(detail);
+      });
+      actions.appendChild(editBtn);
+      historyDetailHeader.appendChild(actions);
+    }
+  }
+
+  /** Open the reusable NotesEditor scoped to a saved session. The
+   *  editor auto-saves by dispatching a `session_notes_update_request`
+   *  over the WebSocket; server ack re-renders the header with the
+   *  new body. */
+  function openHistoryNotesEditor(detail) {
+    if (!window.NotesEditor) {
+      console.warn("[iGrill] NotesEditor not loaded");
+      return;
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("[iGrill] WebSocket not open — cannot edit notes");
+      return;
+    }
+    var sessionId = detail.sessionId;
+    var handle = window.NotesEditor.open({
+      sessionId: sessionId,
+      initialBody: detail.notesBody || "",
+      onSave: function (body) {
+        sendWs({
+          v: 2,
+          type: "session_notes_update_request",
+          requestId: generateRequestId(),
+          payload: {
+            sessionId: sessionId,
+            body: body,
+          },
+        });
+        /* Optimistically update the cached body so closing/reopening
+         * shows the latest text even before the ack lands. */
+        if (historyDetailCache && historyDetailCache.sessionId === sessionId) {
+          historyDetailCache.notesBody = body;
+          renderHistoryDetailHeader(historyDetailCache, historyDetailCache);
+        }
+      },
+    });
+    historyNotesEditor = handle;
+    var originalClose = handle.close;
+    handle.close = function () {
+      historyNotesEditor = null;
+      originalClose();
+    };
   }
 
   function renderHistoryCharts(data) {
