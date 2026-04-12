@@ -9,6 +9,7 @@
   <!-- Session-first redesign state modules. See service/web/static/js/stores/. -->
   <script src="/static/js/stores/sessionStore.js"></script>
   <script src="/static/js/stores/rollingBuffer.js"></script>
+  <script src="/static/js/components/probeTargetConfigSheet.js"></script>
   <style>
     :root {
       --bg-primary: #1a1a2e;
@@ -167,6 +168,208 @@
        JS; hidden visually until Task 4/6/7/11 replaces the UI. */
     .legacy-cook-scaffolding {
       display: none;
+    }
+
+    /* -- Idle Cook View (Task 4) ---------------------------------------- */
+
+    .idle-cook {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .idle-cook-hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 0.85rem;
+      padding: 1.75rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .idle-cook-hero-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .idle-cook-hero-sub {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      max-width: 26rem;
+    }
+
+    .idle-cook-empty {
+      text-align: center;
+      padding: 2.5rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--text-secondary);
+    }
+
+    .idle-cook-empty p {
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }
+
+    .idle-cook-empty .link-btn {
+      background: none;
+      border: none;
+      color: var(--brand);
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font: inherit;
+    }
+
+    .idle-cook-empty .link-btn:hover {
+      background: var(--brand-tint);
+    }
+
+    .idle-cook-empty .link-btn:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
+    }
+
+    .idle-device-cards {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+
+    @media (min-width: 640px) {
+      .idle-device-cards {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .idle-device-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .idle-device-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .idle-device-name {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .idle-device-state {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .idle-device-state.offline {
+      background: rgba(248, 113, 113, 0.15);
+      color: var(--red);
+    }
+
+    .idle-device-state.pending {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--yellow);
+    }
+
+    .idle-probes {
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+    }
+
+    .idle-probe-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.65rem;
+      background: var(--bg-secondary);
+      border-radius: 6px;
+    }
+
+    .idle-probe-label {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      font-weight: 500;
+      min-width: 4.5rem;
+    }
+
+    .idle-probe-temp {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+      min-width: 3.5rem;
+      text-align: right;
+    }
+
+    .idle-probe-temp.unplugged {
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    .idle-sparkline {
+      flex: 1;
+      height: 30px;
+      max-width: 120px;
+    }
+
+    .idle-sparkline polyline {
+      fill: none;
+      stroke: var(--brand);
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .idle-sparkline-empty {
+      flex: 1;
+      max-width: 120px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-align: right;
+      font-style: italic;
+    }
+
+    .active-cook-placeholder {
+      padding: 2rem 1.5rem;
+      text-align: center;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text-secondary);
+    }
+
+    .active-cook-placeholder h2 {
+      font-size: 1.1rem;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
     }
 
     /* -- Tab Content ---------------------------------------------------- */
@@ -1038,14 +1241,25 @@
 <!-- ================================================================== -->
 <div class="tab-content active" id="tab-cook" role="tabpanel" aria-labelledby="tab-btn-cook">
 
-  <!-- Placeholder shown until Task 4 replaces it with IdleCookView -->
-  <section class="cook-placeholder" id="cookPlaceholder">
-    <div class="cook-placeholder-title">Ready to cook</div>
-    <p class="cook-placeholder-body">
-      The new Cook experience is on the way. For now, manage devices and
-      simulation in Settings. Start Cook will wire up in the next update.
-    </p>
-    <button class="btn btn-brand" id="btnStartCookPlaceholder" disabled aria-disabled="true">Start Cook</button>
+  <!-- IdleCookView (Task 4): device cards + rolling 3-minute sparklines -->
+  <section class="idle-cook" id="idleCookView">
+    <div class="idle-cook-hero">
+      <div class="idle-cook-hero-title">Ready to cook</div>
+      <p class="idle-cook-hero-sub" id="idleCookSub">
+        Start a cook to begin tracking temperatures, targets and alerts.
+      </p>
+      <button class="btn btn-brand" id="btnStartCook" disabled aria-disabled="true">Start Cook</button>
+    </div>
+
+    <div id="idleCookBody">
+      <!-- Device cards or empty state injected here by JS -->
+    </div>
+  </section>
+
+  <!-- Active session placeholder (Task 7 will replace this) -->
+  <section class="active-cook-placeholder" id="activeCookPlaceholder" style="display:none;">
+    <h2>Session active</h2>
+    <p>The live session view will land in the next update.</p>
   </section>
 
   <!--
