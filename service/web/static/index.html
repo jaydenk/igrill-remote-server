@@ -10,6 +10,8 @@
   <script src="/static/js/stores/sessionStore.js"></script>
   <script src="/static/js/stores/rollingBuffer.js"></script>
   <script src="/static/js/components/probeTargetConfigSheet.js"></script>
+  <script src="/static/js/components/startCookFlow.js"></script>
+  <script src="/static/js/components/activeSessionView.js"></script>
   <style>
     :root {
       --bg-primary: #1a1a2e;
@@ -1256,11 +1258,9 @@
     </div>
   </section>
 
-  <!-- Active session placeholder (Task 7 will replace this) -->
-  <section class="active-cook-placeholder" id="activeCookPlaceholder" style="display:none;">
-    <h2>Session active</h2>
-    <p>The live session view will land in the next update.</p>
-  </section>
+  <!-- Active session view container. Mounted by ActiveSessionView (Task 7)
+       whenever SessionStore.status === "active". -->
+  <section class="active-cook-view" id="activeCookPlaceholder" style="display:none;"></section>
 
   <!--
     Legacy DOM retained so session/chart/device logic keeps functioning
@@ -2610,7 +2610,45 @@
   /* Message Handling                                                     */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* WebSocket message subscribers (for new components).                  */
+  /*                                                                      */
+  /* The legacy dashboard dispatches via a switch below; StartCookFlow    */
+  /* and other session-first components need to observe responses        */
+  /* (session_start_ack, error) without modifying that switch.           */
+  /* ------------------------------------------------------------------ */
+
+  var wsMessageSubscribers = [];
+
+  function subscribeWsMessage(fn) {
+    if (typeof fn !== "function") return function () {};
+    wsMessageSubscribers.push(fn);
+    return function () {
+      var i = wsMessageSubscribers.indexOf(fn);
+      if (i !== -1) wsMessageSubscribers.splice(i, 1);
+    };
+  }
+
+  function notifyWsSubscribers(msg) {
+    /* Iterate over a copy so subscribers may unsubscribe during
+     * dispatch without mutating the list we're walking. */
+    var snapshot = wsMessageSubscribers.slice();
+    for (var i = 0; i < snapshot.length; i++) {
+      try { snapshot[i](msg); } catch (e) {
+        console.warn("[iGrill] ws subscriber threw:", e);
+      }
+    }
+  }
+
+  function sendWs(envelope) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket is not open");
+    }
+    ws.send(JSON.stringify(envelope));
+  }
+
   function handleMessage(msg) {
+    notifyWsSubscribers(msg);
     var type = msg.type;
     var payload = msg.payload || {};
 
@@ -3792,6 +3830,10 @@
     }
   }
 
+  /* Tracks whether ActiveSessionView is currently mounted so we only
+   * call mount()/unmount() on status transitions, not every render. */
+  var activeSessionViewMounted = false;
+
   function renderIdleCookView() {
     if (!idleCookView || !activeCookPlaceholder) return;
     var storeState =
@@ -3802,9 +3844,17 @@
     if (storeState.status === "active") {
       idleCookView.style.display = "none";
       activeCookPlaceholder.style.display = "";
+      if (!activeSessionViewMounted && window.ActiveSessionView) {
+        window.ActiveSessionView.mount(activeCookPlaceholder);
+        activeSessionViewMounted = true;
+      }
       return;
     }
 
+    if (activeSessionViewMounted && window.ActiveSessionView) {
+      window.ActiveSessionView.unmount();
+      activeSessionViewMounted = false;
+    }
     idleCookView.style.display = "";
     activeCookPlaceholder.style.display = "none";
     updateStartCookButton();
@@ -3814,16 +3864,23 @@
   if (btnStartCook) {
     btnStartCook.addEventListener("click", function () {
       if (btnStartCook.disabled) return;
-      /* Nudge the store into a configuring status; Task 6 will add a
-       * proper action type and the real configure flow. For now this
-       * is intentionally a no-op at the reducer layer (unknown action
-       * types return current state). */
-      if (window.SessionStore && window.SessionStore.instance) {
-        window.SessionStore.instance.dispatch({
-          type: "__set_status__",
-          payload: { status: "configuring" },
-        });
+      if (!window.StartCookFlow) {
+        console.warn("[iGrill] StartCookFlow not loaded");
+        return;
       }
+      /* The flow reads `devices` from our closure and submits the
+       * session_start_request via sendWs. Auth, if configured server-
+       * side via IGRILL_SESSION_TOKEN, is enforced at WebSocket
+       * upgrade time — a browser without a valid token simply
+       * wouldn't have an open connection here. No additional token
+       * plumbing is needed on a per-message basis. */
+      window.StartCookFlow.open({
+        devices: devices,
+        send: sendWs,
+        generateRequestId: generateRequestId,
+        onMessage: subscribeWsMessage,
+        temperatureUnit: "C",
+      });
     });
   }
 
