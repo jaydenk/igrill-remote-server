@@ -22,6 +22,7 @@ from service.config import Config
 from service.history.store import HistoryStore, now_iso_utc
 from service.models.device import DeviceStore
 from service.models.session import TargetConfig
+from service.simulate.runner import SimulationRunner
 
 LOG = logging.getLogger("igrill.ws")
 
@@ -213,6 +214,7 @@ class _MessageContext:
     history: HistoryStore
     evaluator: AlertEvaluator
     config: Config
+    simulator: Optional[SimulationRunner]
     authorized: bool
     peer: str
     request_id: Optional[str]
@@ -478,6 +480,10 @@ async def _handle_session_end(ctx: _MessageContext) -> None:
     ended_session_id = result["sessionId"]
     ctx.evaluator.clear_session(ended_session_id)
 
+    # Stop simulation if the ended session was a simulated one
+    if ctx.simulator and ctx.simulator.is_running:
+        await ctx.simulator.stop()
+
     await ctx.store.publish_event(make_envelope("session_end", result))
 
     await send_envelope(
@@ -653,6 +659,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     hub: WebSocketHub = request.app["hub"]
     evaluator: AlertEvaluator = request.app["evaluator"]
     config: Config = request.app["config"]
+    simulator: Optional[SimulationRunner] = request.app.get("simulator")
     authorized = is_authorized(request)
 
     ws = web.WebSocketResponse(heartbeat=30)
@@ -723,6 +730,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         history=history,
                         evaluator=evaluator,
                         config=config,
+                        simulator=simulator,
                         authorized=authorized,
                         peer=peer,
                         request_id=request_id,
