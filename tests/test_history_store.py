@@ -350,6 +350,113 @@ async def test_recover_orphaned_sessions(tmp_db, sample_address):
 
 
 @pytest.mark.asyncio
+async def test_recover_orphaned_sessions_handles_partial_discard(
+    store, sample_address, monkeypatch
+):
+    """A crash mid-discard must leave the database in a consistent state.
+
+    ``discard_session`` performs its deletes inside a single BEGIN/COMMIT
+    transaction wrapped in a try/except that issues ROLLBACK on failure.
+    If a crash prevents the commit, every child-table DELETE is rolled
+    back atomically by SQLite — so the session row and its children
+    remain intact. On startup, ``recover_orphaned_sessions`` should then
+    close the still-active session as a normal orphan
+    (``end_reason="server_restart"``).
+
+    This test encodes that guarantee end-to-end in a single connection
+    (equivalent to crash + restart, but simpler to express):
+
+      1. Start a session and write some child rows.
+      2. Patch ``_conn.commit`` so ``discard_session`` raises on commit —
+         the except branch issues ROLLBACK, unwinding every DELETE.
+      3. Verify all session data is still on disk (rollback was atomic).
+      4. Call ``recover_orphaned_sessions`` to simulate the post-restart
+         startup hook and verify it ends the session normally.
+    """
+    from service.models.session import TargetConfig
+
+    # 1. Populate a session with data to make rollback observable.
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 72.5}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+    await store.save_targets(
+        sid,
+        sample_address,
+        [TargetConfig(probe_index=1, mode="fixed", target_value=74.0)],
+    )
+    await store.upsert_primary_note(sid, "before crash")
+
+    # Sanity — data exists before the simulated crash.
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    # 2. Patch commit to raise — simulates a crash between the final
+    #    DELETE and the COMMIT. The except branch inside discard_session
+    #    issues ROLLBACK, which undoes every DELETE atomically.
+    original_commit = store._conn.commit
+
+    async def failing_commit():
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(store._conn, "commit", failing_commit)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await store.discard_session(sid)
+
+    # Restore commit so subsequent operations work normally. This
+    # represents the fresh process that comes up after a real crash —
+    # SQLite would roll back any uncommitted txn on reconnect; here the
+    # in-process ROLLBACK inside discard_session's except block already
+    # cleaned it up.
+    monkeypatch.setattr(store._conn, "commit", original_commit)
+
+    # 3. Every child row must still be present (rollback was atomic).
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    cursor = await store._conn.execute(
+        "SELECT id, ended_at FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    # Session is still active (ended_at IS NULL) — it looks like an
+    # orphan to recovery.
+    assert row["ended_at"] is None
+
+    # The discard raised, so in-memory state is (correctly) untouched;
+    # reset it to simulate a fresh process after restart where no
+    # session is loaded yet.
+    store._current_session_id = None
+    store._current_session_start_ts = None
+
+    # 4. Run recovery — the still-active session must be closed with
+    #    end_reason="server_restart". Child data remains intact.
+    await store.recover_orphaned_sessions()
+
+    sessions = await store.list_sessions(limit=10)
+    assert len(sessions) == 1
+    assert sessions[0]["sessionId"] == sid
+    assert sessions[0]["endReason"] == "server_restart"
+
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+
+@pytest.mark.asyncio
 async def test_get_history_items_with_time_filter(store, sample_address):
     """get_history_items should filter by since_ts and until_ts."""
     from datetime import datetime, timezone, timedelta
