@@ -631,6 +631,53 @@ async def _handle_probe_timer(ctx: _MessageContext) -> None:
     )
 
 
+async def _handle_session_notes_update(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to update session notes",
+            request_id=ctx.request_id,
+        )
+        return
+
+    body = ctx.payload.get("body")
+    if not isinstance(body, str):
+        await send_error(
+            ctx.ws, "invalid_payload", "body is required and must be a string.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_id = ctx.payload.get("sessionId")
+    if session_id is None:
+        session_state = await ctx.history.get_session_state()
+        session_id = session_state.get("current_session_id")
+        if session_id is None:
+            await send_error(
+                ctx.ws, "no_session_specified",
+                "No sessionId provided and no active session.",
+                request_id=ctx.request_id,
+            )
+            return
+    else:
+        session_id = str(session_id)
+
+    if not await ctx.history.session_exists(session_id):
+        await send_error(
+            ctx.ws, "session_not_found",
+            f"Session {session_id} does not exist.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    row = await ctx.history.upsert_primary_note(session_id, body)
+
+    await ctx.store.publish_event(make_envelope("session_notes_update", row))
+
+    await send_envelope(
+        ctx.ws, "session_notes_update_ack", row, request_id=ctx.request_id,
+    )
+
+
 async def _handle_target_update(ctx: _MessageContext) -> None:
     if not ctx.authorized:
         await send_error(
@@ -780,6 +827,7 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "target_update_request": _handle_target_update,
     "session_add_device_request": _handle_session_add_device,
     "probe_timer_request": _handle_probe_timer,
+    "session_notes_update_request": _handle_session_notes_update,
 }
 
 

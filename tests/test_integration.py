@@ -568,6 +568,229 @@ async def test_ws_probe_timer_countdown_requires_duration(client):
         assert msg["payload"]["code"] == "invalid_mode"
 
 
+# ---------------------------------------------------------------------------
+# session_notes_update_request handler tests (Task 11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_active_session(client):
+    """session_notes_update_request with no sessionId uses the active session,
+    acks the requester with the note row, broadcasts session_notes_update to
+    other clients, and the body is visible via GET /api/sessions/{id}."""
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+
+    await _seed_device(client)
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, client.ws_connect("/ws") as ws_b:
+            await ws_a.send_json({
+                "v": 2, "type": "session_start_request", "requestId": "r1",
+                "payload": {
+                    "name": "Notes Test",
+                    "deviceAddresses": [_TEST_DEVICE],
+                    "targets": [{"probe_index": 1, "mode": "fixed", "target_value": 90}],
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "session_start_ack":
+                msg = await ws_a.receive_json()
+            session_id = msg["payload"]["sessionId"]
+
+            # Drain the session_start broadcast on ws_b so the notes broadcast
+            # is easy to isolate.
+            for _ in range(5):
+                try:
+                    msg_b = await _asyncio.wait_for(ws_b.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                if msg_b.get("type") == "session_start":
+                    break
+
+            await ws_a.send_json({
+                "v": 2, "type": "session_notes_update_request", "requestId": "n1",
+                "payload": {"body": "Low and slow — oak wood."},
+            })
+            ack = await ws_a.receive_json()
+            while ack.get("type") not in ("session_notes_update_ack", "error"):
+                ack = await ws_a.receive_json()
+            assert ack.get("type") == "session_notes_update_ack", ack
+            assert ack["payload"]["session_id"] == session_id
+            assert ack["payload"]["body"] == "Low and slow — oak wood."
+            assert ack["payload"]["created_at"] is not None
+            assert ack["payload"]["updated_at"] is not None
+
+            saw_broadcast = False
+            for _ in range(10):
+                try:
+                    msg_b = await _asyncio.wait_for(ws_b.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                if msg_b.get("type") == "session_notes_update":
+                    assert msg_b["payload"]["session_id"] == session_id
+                    assert msg_b["payload"]["body"] == "Low and slow — oak wood."
+                    saw_broadcast = True
+                    break
+            assert saw_broadcast, "ws_b did not observe session_notes_update broadcast"
+
+        resp = await client.get(f"/api/sessions/{session_id}")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["notes"] == "Low and slow — oak wood."
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_after_session_ends(client):
+    """Notes remain editable after the session ends: the explicit sessionId
+    path works on an ended session."""
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+
+    await _seed_device(client)
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, client.ws_connect("/ws") as ws_b:
+            await ws_a.send_json({
+                "v": 2, "type": "session_start_request", "requestId": "r1",
+                "payload": {
+                    "name": "Ends First",
+                    "deviceAddresses": [_TEST_DEVICE],
+                    "targets": [{"probe_index": 1, "mode": "fixed", "target_value": 90}],
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "session_start_ack":
+                msg = await ws_a.receive_json()
+            session_id = msg["payload"]["sessionId"]
+
+            # First write a note while the session is active to establish the row.
+            await ws_a.send_json({
+                "v": 2, "type": "session_notes_update_request", "requestId": "n1",
+                "payload": {"sessionId": session_id, "body": "initial"},
+            })
+            ack = await ws_a.receive_json()
+            while ack.get("type") not in ("session_notes_update_ack", "error"):
+                ack = await ws_a.receive_json()
+            assert ack.get("type") == "session_notes_update_ack"
+
+            # End the session.
+            await ws_a.send_json({
+                "v": 2, "type": "session_end_request", "requestId": "r2", "payload": {},
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "session_end_ack":
+                msg = await ws_a.receive_json()
+
+            # Drain whatever ws_b has queued so we can isolate the next broadcast.
+            for _ in range(20):
+                try:
+                    await _asyncio.wait_for(ws_b.receive_json(), timeout=0.3)
+                except _asyncio.TimeoutError:
+                    break
+
+            # Edit the note with an explicit sessionId (no active session now).
+            await ws_a.send_json({
+                "v": 2, "type": "session_notes_update_request", "requestId": "n2",
+                "payload": {"sessionId": session_id, "body": "updated after end"},
+            })
+            ack = await ws_a.receive_json()
+            while ack.get("type") not in ("session_notes_update_ack", "error"):
+                ack = await ws_a.receive_json()
+            assert ack.get("type") == "session_notes_update_ack", ack
+            assert ack["payload"]["body"] == "updated after end"
+
+            saw_broadcast = False
+            for _ in range(10):
+                try:
+                    msg_b = await _asyncio.wait_for(ws_b.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                if msg_b.get("type") == "session_notes_update":
+                    assert msg_b["payload"]["body"] == "updated after end"
+                    saw_broadcast = True
+                    break
+            assert saw_broadcast, "ws_b did not observe post-end session_notes_update"
+
+        resp = await client.get(f"/api/sessions/{session_id}")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["notes"] == "updated after end"
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_session_not_found(client):
+    """Explicit sessionId pointing at a non-existent session returns
+    session_not_found."""
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_notes_update_request", "requestId": "n1",
+            "payload": {"sessionId": "does-not-exist", "body": "anything"},
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_notes_update_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "session_not_found"
+        assert msg.get("requestId") == "n1"
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_missing_body(client):
+    """Missing body is rejected with invalid_payload, even when an active
+    session exists."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "name": "Missing Body",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [{"probe_index": 1, "mode": "fixed", "target_value": 90}],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+
+        await ws.send_json({
+            "v": 2, "type": "session_notes_update_request", "requestId": "n1",
+            "payload": {},
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_notes_update_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_payload"
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_no_session_specified(client):
+    """No active session and no sessionId returns no_session_specified."""
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_notes_update_request", "requestId": "n1",
+            "payload": {"body": "orphan note"},
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_notes_update_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "no_session_specified"
+
+
 @pytest.mark.asyncio
 async def test_ws_probe_timer_start_without_upsert(client):
     """start on a probe that has no timer row returns timer_not_found."""
