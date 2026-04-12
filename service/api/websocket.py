@@ -546,6 +546,91 @@ async def _handle_session_discard(ctx: _MessageContext) -> None:
     )
 
 
+async def _handle_probe_timer(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to modify probe timers",
+            request_id=ctx.request_id,
+        )
+        return
+
+    address = ctx.payload.get("address")
+    probe_index = ctx.payload.get("probe_index")
+    action = ctx.payload.get("action")
+
+    if not isinstance(address, str) or not address:
+        await send_error(
+            ctx.ws, "invalid_payload", "address is required.",
+            request_id=ctx.request_id,
+        )
+        return
+    if not isinstance(probe_index, int):
+        await send_error(
+            ctx.ws, "invalid_payload", "probe_index must be an integer.",
+            request_id=ctx.request_id,
+        )
+        return
+    if not isinstance(action, str):
+        await send_error(
+            ctx.ws, "invalid_payload", "action is required.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    try:
+        if action == "upsert":
+            mode = ctx.payload.get("mode")
+            duration_secs = ctx.payload.get("duration_secs")
+            if mode == "count_down" and duration_secs is None:
+                await send_error(
+                    ctx.ws, "invalid_mode",
+                    "duration_secs is required when mode is count_down.",
+                    request_id=ctx.request_id,
+                )
+                return
+            row = await ctx.history.upsert_timer(
+                current_sid, address, probe_index, mode, duration_secs,
+            )
+        elif action == "start":
+            row = await ctx.history.start_timer(current_sid, address, probe_index)
+        elif action == "pause":
+            row = await ctx.history.pause_timer(current_sid, address, probe_index)
+        elif action == "resume":
+            row = await ctx.history.resume_timer(current_sid, address, probe_index)
+        elif action == "reset":
+            row = await ctx.history.reset_timer(current_sid, address, probe_index)
+        else:
+            await send_error(
+                ctx.ws, "invalid_action",
+                f"Unsupported probe_timer action: {action}",
+                request_id=ctx.request_id,
+            )
+            return
+    except ValueError as exc:
+        message = str(exc)
+        if action == "upsert" and "mode must be" in message:
+            code = "invalid_mode"
+        else:
+            code = "timer_not_found"
+        await send_error(ctx.ws, code, message, request_id=ctx.request_id)
+        return
+
+    await ctx.store.publish_event(make_envelope("probe_timer_update", row))
+
+    await send_envelope(
+        ctx.ws, "probe_timer_ack", row, request_id=ctx.request_id,
+    )
+
+
 async def _handle_target_update(ctx: _MessageContext) -> None:
     if not ctx.authorized:
         await send_error(
@@ -694,6 +779,7 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "session_update_request": _handle_session_update,
     "target_update_request": _handle_target_update,
     "session_add_device_request": _handle_session_add_device,
+    "probe_timer_request": _handle_probe_timer,
 }
 
 

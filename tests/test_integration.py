@@ -328,3 +328,262 @@ async def test_session_detail_includes_name_notes(client):
     body = await resp.json()
     assert body.get("name") == "REST Test"
     assert body["targets"][0]["label"] == "Brisket"
+
+
+# ---------------------------------------------------------------------------
+# probe_timer_request handler tests (Task 10)
+# ---------------------------------------------------------------------------
+
+
+async def _start_session_for_timer(ws) -> str:
+    """Helper — start a session over ws and return its session id."""
+    await ws.send_json({
+        "v": 2, "type": "session_start_request", "requestId": "rstart",
+        "payload": {
+            "name": "Timer Test",
+            "deviceAddresses": [_TEST_DEVICE],
+            "targets": [{"probe_index": 1, "mode": "fixed", "target_value": 90}],
+        },
+    })
+    msg = await ws.receive_json()
+    while msg.get("type") != "session_start_ack":
+        msg = await ws.receive_json()
+    return msg["payload"]["sessionId"]
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_full_roundtrip(client):
+    """Full probe_timer lifecycle: upsert + start + pause + resume + reset,
+    with ack on the requester and probe_timer_update broadcast on a second
+    observer client."""
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+
+    await _seed_device(client)
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, client.ws_connect("/ws") as ws_b:
+            session_id = await _start_session_for_timer(ws_a)
+
+            async def _drain_until(ws, ack_type):
+                msg = await ws.receive_json()
+                while msg.get("type") not in (ack_type, "error"):
+                    msg = await ws.receive_json()
+                return msg
+
+            async def _wait_for_broadcast(ws, wanted_type):
+                for _ in range(20):
+                    try:
+                        msg = await _asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                    except _asyncio.TimeoutError:
+                        return None
+                    if msg.get("type") == wanted_type:
+                        return msg
+                return None
+
+            # --- upsert ---
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "t1",
+                "payload": {
+                    "address": _TEST_DEVICE,
+                    "probe_index": 1,
+                    "action": "upsert",
+                    "mode": "count_down",
+                    "duration_secs": 60,
+                },
+            })
+            ack = await _drain_until(ws_a, "probe_timer_ack")
+            assert ack.get("type") == "probe_timer_ack", ack
+            assert ack["payload"]["session_id"] == session_id
+            assert ack["payload"]["address"] == _TEST_DEVICE
+            assert ack["payload"]["probe_index"] == 1
+            assert ack["payload"]["mode"] == "count_down"
+            assert ack["payload"]["duration_secs"] == 60
+            assert ack["payload"]["started_at"] is None
+            assert ack["payload"]["paused_at"] is None
+            assert ack["payload"]["accumulated_secs"] == 0
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, "ws_b did not observe upsert broadcast"
+            assert broadcast["payload"]["mode"] == "count_down"
+            assert broadcast["payload"]["duration_secs"] == 60
+
+            # --- start ---
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "t2",
+                "payload": {
+                    "address": _TEST_DEVICE, "probe_index": 1, "action": "start",
+                },
+            })
+            ack = await _drain_until(ws_a, "probe_timer_ack")
+            assert ack.get("type") == "probe_timer_ack", ack
+            assert ack["payload"]["started_at"] is not None
+            assert ack["payload"]["paused_at"] is None
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, "ws_b did not observe start broadcast"
+            assert broadcast["payload"]["started_at"] is not None
+
+            # --- pause ---
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "t3",
+                "payload": {
+                    "address": _TEST_DEVICE, "probe_index": 1, "action": "pause",
+                },
+            })
+            ack = await _drain_until(ws_a, "probe_timer_ack")
+            assert ack.get("type") == "probe_timer_ack", ack
+            assert ack["payload"]["paused_at"] is not None
+            assert ack["payload"]["started_at"] is None
+            assert ack["payload"]["accumulated_secs"] >= 0
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, "ws_b did not observe pause broadcast"
+            assert broadcast["payload"]["paused_at"] is not None
+
+            # --- resume ---
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "t4",
+                "payload": {
+                    "address": _TEST_DEVICE, "probe_index": 1, "action": "resume",
+                },
+            })
+            ack = await _drain_until(ws_a, "probe_timer_ack")
+            assert ack.get("type") == "probe_timer_ack", ack
+            assert ack["payload"]["paused_at"] is None
+            assert ack["payload"]["started_at"] is not None
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, "ws_b did not observe resume broadcast"
+            assert broadcast["payload"]["started_at"] is not None
+
+            # --- reset ---
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "t5",
+                "payload": {
+                    "address": _TEST_DEVICE, "probe_index": 1, "action": "reset",
+                },
+            })
+            ack = await _drain_until(ws_a, "probe_timer_ack")
+            assert ack.get("type") == "probe_timer_ack", ack
+            assert ack["payload"]["accumulated_secs"] == 0
+            assert ack["payload"]["started_at"] is None
+            assert ack["payload"]["paused_at"] is None
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, "ws_b did not observe reset broadcast"
+            assert broadcast["payload"]["accumulated_secs"] == 0
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_no_active_session(client):
+    """probe_timer_request with no active session returns no_active_session."""
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "r1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": 1,
+                "action": "start",
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "no_active_session"
+        assert msg.get("requestId") == "r1"
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_invalid_action(client):
+    """Unknown action strings produce an invalid_action error."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await _start_session_for_timer(ws)
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "r1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": 1,
+                "action": "explode",
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_action"
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_invalid_mode(client):
+    """Upserting with a mode other than count_up/count_down returns invalid_mode."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await _start_session_for_timer(ws)
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "r1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": 1,
+                "action": "upsert",
+                "mode": "countdown",  # missing underscore
+                "duration_secs": 60,
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_mode"
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_countdown_requires_duration(client):
+    """count_down mode without duration_secs is rejected."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await _start_session_for_timer(ws)
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "r1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": 1,
+                "action": "upsert",
+                "mode": "count_down",
+                # duration_secs deliberately omitted
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_mode"
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_start_without_upsert(client):
+    """start on a probe that has no timer row returns timer_not_found."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await _start_session_for_timer(ws)
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "r1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": 7,  # never upserted
+                "action": "start",
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "timer_not_found"
