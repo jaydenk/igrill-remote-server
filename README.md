@@ -6,6 +6,17 @@ Originally derived from [bendikwa/esphome-igrill](https://github.com/bendikwa/es
 
 A standalone BLE polling service for Weber iGrill thermometer devices. It continuously scans for and connects to iGrill devices over Bluetooth Low Energy, exposes real-time temperature data via an HTTP + WebSocket API, and serves a single-page web dashboard for live monitoring.
 
+### Session-First Capabilities
+
+The server is built around a session-first model where every cook is an explicit, user-initiated session that can be saved or discarded at end:
+
+- **Explicit save-or-discard decision** — ending a session saves it to history; a separate `session_discard_request` hard-deletes an active session (and all child readings, timers, notes, targets) without persisting it.
+- **Per-probe timers** — each probe supports an independent count-up or count-down timer (`upsert`, `start`, `pause`, `resume`, `reset`), persisted to a dedicated `session_timers` table and broadcast authoritatively to all clients.
+- **Dedicated session notes** — session notes live in a `session_notes` table separate from session metadata, edit-able both during and after a cook.
+- **Target cook duration** — optional `targetDurationSecs` on session start, surfaced in status, listings, and exports.
+
+See `docs/plans/2026-04-12-session-first-server-plan.md` for the full design.
+
 ## Supported Devices
 
 - iGrill mini
@@ -147,8 +158,8 @@ IGRILL_APNS_USE_SANDBOX=true
 | `GET` | `/` | Web dashboard — tab-based single-page UI (Live, History, Settings) with real-time WebSocket updates, session controls (including optional session name input), BLE state indicators, live temperature charts (uPlot) with probe labels, past session browsing with names, notes, and full-timeline charts and summary statistics, runtime log level management, and simulation controls (start/stop simulated cook sessions with configurable probe count and speed). |
 | `GET` | `/health` | Health check with uptime, device counts, active session ID, poll interval, and scan interval. |
 | `GET` | `/api/sessions` | Paginated session list (`?limit=20&offset=0`). |
-| `GET` | `/api/sessions/{id}` | Session detail with `name`, `notes`, devices, targets, and readings. Returns 404 if the session does not exist. |
-| `GET` | `/api/sessions/{id}/export` | Export session data as CSV (`?format=csv`) or enriched JSON (`?format=json`, default). CSV columns: `timestamp`, `probe_index`, `label`, `temperature_c`, `battery_pct`, `propane_pct`. |
+| `GET` | `/api/sessions/{id}` | Session detail with `name`, `notesBody` (legacy primary-note string), `notes` (array of note rows from `session_notes`), `timers` (array of per-probe timer rows), `targetDurationSecs`, `devices`, `targets`, and `readings`. Returns 404 if the session does not exist. |
+| `GET` | `/api/sessions/{id}/export` | Export session data as CSV (`?format=csv`) or enriched JSON (`?format=json`, default). JSON always includes the full bundle (`readings`, `timers`, `notes`, `notesBody`, `targetDurationSecs`). CSV selects a single resource via `?resource=readings\|timers\|notes` (defaults to `readings`): `readings` columns are `timestamp`, `probe_index`, `label`, `temperature_c`, `battery_pct`, `propane_pct`; `timers` columns are `address`, `probe_index`, `mode`, `duration_secs`, `started_at`, `paused_at`, `accumulated_secs`, `completed_at`; `notes` columns are `id`, `created_at`, `updated_at`, `body`. |
 | `POST` | `/api/v1/devices/push-token` | Register or update an APNS push token. Body: `{"token": "hex_device_token", "liveActivityToken": "hex_la_token"}`. The `liveActivityToken` field is optional. |
 | `POST` | `/api/v1/simulate/start` | Start a simulated cook session. Body (optional): `{"speed": 10, "probes": 4}`. `speed` is the time multiplier (default 10), `probes` is the number of active probes 1-4 (default 4). Returns `sessionId`, `speed`, and `probes`. Returns 409 if a simulation is already running. Requires authorisation. |
 | `POST` | `/api/v1/simulate/stop` | Stop the running simulation. Returns the `sessionId` and total `readings` count. Returns 400 if no simulation is running. Requires authorisation. |
@@ -169,11 +180,14 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | `status_request` | Returns device state, session info, sample rate, active targets, and session devices. |
 | `sessions_request` | Lists recent sessions (`payload.limit` defaults to 20, max 100; `payload.offset` defaults to 0). |
 | `history_request` | Streams history chunks (`sinceTs`, `untilTs`, `limit` (max 10,000), `sessionId`, `chunkSize`). |
-| `session_start_request` | Starts a new user-initiated session. Accepts optional `name` (string), `targets` array, and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
-| `session_end_request` | Ends the current session. Requires authorisation. |
+| `session_start_request` | Starts a new user-initiated session. Accepts optional `name` (string), `targets` array, `targetDurationSecs` (positive integer — optional target cook length), and `deviceAddresses` (array) or `deviceAddress` (string). If no devices are specified, all currently connected devices are included. Requires authorisation. |
+| `session_end_request` | Ends (saves) the current session. The session is persisted to history. Requires authorisation. |
+| `session_discard_request` | Hard-deletes the active session and all its child data (readings, timers, notes, targets) without persisting. Stops the simulator if running. Requires authorisation. |
 | `session_update_request` | Updates `name` and/or `notes` on a session. Optional `sessionId` field; defaults to the active session. Requires authorisation. |
+| `session_notes_update_request` | Upserts the session's primary note body into the `session_notes` table. Accepts `body` (string, required) and optional `sessionId` (defaults to the active session). Editable on saved sessions too. Requires authorisation. |
 | `session_add_device_request` | Adds a device to the active session mid-cook. Requires `deviceAddress` in payload. Requires authorisation. |
 | `target_update_request` | Updates targets for the current session. Accepts optional `deviceAddress` to scope targets to a specific device. Requires authorisation. |
+| `probe_timer_request` | Creates or mutates a per-probe timer. Payload: `address` (string), `probe_index` (int), `action` (one of `upsert`, `start`, `pause`, `resume`, `reset`); `upsert` additionally accepts `mode` (`count_up` or `count_down`) and `duration_secs` (required when `mode` is `count_down`). Requires an active session and authorisation. |
 
 **Server response types:**
 
@@ -182,9 +196,12 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | `status` | Response to `status_request` with device state, session info (including `currentSessionName` when a session is active), sample rate, active targets, and session devices. |
 | `sessions_list` | Response to `sessions_request` with recent session summaries. |
 | `history_chunk` / `history_end` | Streamed response to `history_request`. |
-| `session_start_ack` | Acknowledgement for `session_start_request`. Includes `sessionId`, `sessionStartTs`, `name`, `devices`, and `targets`. |
+| `session_start_ack` | Acknowledgement for `session_start_request`. Includes `sessionId`, `sessionStartTs`, `name`, `devices`, `targets`, and `targetDurationSecs`. |
 | `session_end_ack` | Acknowledgement for `session_end_request`. |
+| `session_discard_ack` | Acknowledgement for `session_discard_request`. Includes `ok` and `sessionId` of the deleted session. |
 | `session_update_ack` | Acknowledgement for `session_update_request`. Includes updated `name` and `notes`. |
+| `session_notes_update_ack` | Acknowledgement for `session_notes_update_request`. Includes the updated primary note row (`id`, `createdAt`, `updatedAt`, `body`). |
+| `probe_timer_ack` | Acknowledgement for `probe_timer_request`. Includes the authoritative timer row. |
 | `target_update_ack` | Acknowledgement for `target_update_request`. |
 | `session_add_device_ack` | Acknowledgement for `session_add_device_request`. |
 
@@ -194,6 +211,9 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | --- | --- |
 | `reading` | Pushed on each poll cycle with latest probe data (always broadcast, regardless of session state). |
 | `session_start` / `session_end` | Broadcast when sessions change. |
+| `session_discarded` | Broadcast when the active session is hard-deleted via `session_discard_request`. Payload: `{ "sessionId": "<uuid>" }`. |
+| `probe_timer_update` | Broadcast after any successful `probe_timer_request` (including auto-completion when a count-down timer reaches zero). Payload is the full authoritative timer row. |
+| `session_notes_update` | Broadcast after a successful `session_notes_update_request`. Payload is the full primary note row. |
 | `device_joined` | Broadcast when a device is added to an active session. |
 | `target_approaching` | Probe temperature crossed the pre-alert threshold. In range mode, may include `"subtype": "high"` when approaching the upper bound. |
 | `target_reached` | Probe temperature hit the target. |
@@ -202,6 +222,143 @@ Connect to `/ws` for real-time streaming. All messages use the v2 envelope forma
 | `device_state_change` | Broadcast when a device's connection state changes (e.g. connecting, polling, disconnected, backoff). |
 
 > **Note:** `curl` does not support WebSockets. Use a client such as `websocat`, `wscat`, or an iOS `URLSessionWebSocketTask`.
+
+#### Session-First Message Examples
+
+Envelope fields (`v`, `ts`, `requestId`) are omitted from request bodies below for brevity.
+
+**Start a session with a target cook duration**
+
+```json
+{
+  "type": "session_start_request",
+  "payload": {
+    "name": "Pulled pork",
+    "targetDurationSecs": 28800,
+    "targets": [
+      { "deviceAddress": "AA:BB:CC:DD:EE:FF", "probeIndex": 0, "targetC": 96.0 }
+    ]
+  }
+}
+```
+
+Ack:
+
+```json
+{
+  "type": "session_start_ack",
+  "payload": {
+    "sessionId": "b0a1...",
+    "sessionStartTs": "2026-04-12T10:00:00Z",
+    "name": "Pulled pork",
+    "targetDurationSecs": 28800,
+    "devices": [ ... ],
+    "targets": [ ... ]
+  }
+}
+```
+
+**Discard the active session**
+
+Request:
+
+```json
+{ "type": "session_discard_request", "payload": {} }
+```
+
+Ack (to requester):
+
+```json
+{ "type": "session_discard_ack", "payload": { "ok": true, "sessionId": "b0a1..." } }
+```
+
+Broadcast (to all clients):
+
+```json
+{ "type": "session_discarded", "payload": { "sessionId": "b0a1..." } }
+```
+
+**Per-probe timer — upsert then start a count-down**
+
+Upsert a 30-minute count-down timer:
+
+```json
+{
+  "type": "probe_timer_request",
+  "payload": {
+    "address": "AA:BB:CC:DD:EE:FF",
+    "probe_index": 1,
+    "action": "upsert",
+    "mode": "count_down",
+    "duration_secs": 1800
+  }
+}
+```
+
+Start it running:
+
+```json
+{
+  "type": "probe_timer_request",
+  "payload": {
+    "address": "AA:BB:CC:DD:EE:FF",
+    "probe_index": 1,
+    "action": "start"
+  }
+}
+```
+
+Ack and broadcast payload (same shape — the authoritative row):
+
+```json
+{
+  "type": "probe_timer_update",
+  "payload": {
+    "address": "AA:BB:CC:DD:EE:FF",
+    "probeIndex": 1,
+    "mode": "count_down",
+    "durationSecs": 1800,
+    "startedAt": "2026-04-12T10:05:00Z",
+    "pausedAt": null,
+    "accumulatedSecs": 0,
+    "completedAt": null
+  }
+}
+```
+
+Other supported `action` values: `pause`, `resume`, `reset`. Count-down timers auto-complete when elapsed >= `durationSecs`; the server emits a `probe_timer_update` with `completedAt` set once per timer.
+
+**Update the primary session note**
+
+Request:
+
+```json
+{
+  "type": "session_notes_update_request",
+  "payload": {
+    "body": "Pellet grill at 110C; spritzed at 3h.",
+    "sessionId": "b0a1..."
+  }
+}
+```
+
+Ack and broadcast payload:
+
+```json
+{
+  "type": "session_notes_update",
+  "payload": {
+    "id": 7,
+    "createdAt": "2026-04-12T10:00:00Z",
+    "updatedAt": "2026-04-12T13:02:17Z",
+    "body": "Pellet grill at 110C; spritzed at 3h."
+  }
+}
+```
+
+`sessionId` may be omitted — it defaults to the active session. Notes remain editable on saved (ended) sessions.
+
+> **Backwards compatibility:** the legacy `sessions.notes` column is dual-written alongside the new `session_notes` table during the transition and is exposed via the `notesBody` field on session detail/export responses. It will be dropped in a future migration once all clients have moved to the `notes` array.
 
 ## Architecture
 
