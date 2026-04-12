@@ -301,6 +301,88 @@ async def test_ws_session_discard_rate_limited(aiohttp_client, tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_ws_probe_timer_rate_limited(aiohttp_client, tmp_db):
+    """The 11th probe_timer_request within the window is rate-limited.
+
+    Uses its own isolated app (not the shared ``client`` fixture) because
+    this test deliberately exhausts the module-level rate limiter, and
+    that state would otherwise leak into subsequent tests and hang them.
+    """
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db)
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect("/ws") as ws:
+            # Send 11 probe_timer requests back-to-back.  The first 10 fail
+            # with "invalid_payload" (empty payload), and the 11th should
+            # be rejected earlier by the rate limiter.
+            for i in range(11):
+                await ws.send_json({
+                    "v": 2, "type": "probe_timer_request",
+                    "requestId": f"r{i}", "payload": {},
+                })
+
+            codes: list[str] = []
+            import asyncio as _asyncio
+            for _ in range(11):
+                try:
+                    msg = await _asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                if msg.get("type") == "error":
+                    codes.append(msg["payload"]["code"])
+
+            assert codes[:10] == ["invalid_payload"] * 10
+            assert codes[10] == "rate_limited"
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_session_notes_update_rate_limited(aiohttp_client, tmp_db):
+    """The 11th session_notes_update_request within the window is rate-limited.
+
+    Uses its own isolated app (not the shared ``client`` fixture) because
+    this test deliberately exhausts the module-level rate limiter, and
+    that state would otherwise leak into subsequent tests and hang them.
+    """
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db)
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect("/ws") as ws:
+            # Send 11 session_notes_update requests back-to-back.  The first
+            # 10 fail with "invalid_payload" (missing body), and the 11th
+            # should be rejected earlier by the rate limiter.
+            for i in range(11):
+                await ws.send_json({
+                    "v": 2, "type": "session_notes_update_request",
+                    "requestId": f"r{i}", "payload": {},
+                })
+
+            codes: list[str] = []
+            import asyncio as _asyncio
+            for _ in range(11):
+                try:
+                    msg = await _asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                if msg.get("type") == "error":
+                    codes.append(msg["payload"]["code"])
+
+            assert codes[:10] == ["invalid_payload"] * 10
+            assert codes[10] == "rate_limited"
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
 async def test_session_detail_includes_name_notes(client):
     """GET /api/sessions/{id} includes name, notes, and target labels."""
     await _seed_device(client)
