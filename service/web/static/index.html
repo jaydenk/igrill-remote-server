@@ -11,6 +11,9 @@
   <script src="/static/js/stores/rollingBuffer.js"></script>
   <script src="/static/js/components/probeTargetConfigSheet.js"></script>
   <script src="/static/js/components/startCookFlow.js"></script>
+  <script src="/static/js/components/notesEditor.js"></script>
+  <script src="/static/js/components/addProbeFlow.js"></script>
+  <script src="/static/js/components/endSessionFlow.js"></script>
   <script src="/static/js/components/activeSessionView.js"></script>
   <style>
     :root {
@@ -3845,7 +3848,19 @@
       idleCookView.style.display = "none";
       activeCookPlaceholder.style.display = "";
       if (!activeSessionViewMounted && window.ActiveSessionView) {
-        window.ActiveSessionView.mount(activeCookPlaceholder);
+        /* Hand ActiveSessionView our WebSocket/dispatch wiring so the
+         * Add Probe / Add Note / End Session actions (Tasks 9-11) can
+         * talk to the server without re-implementing send and request-
+         * id plumbing. `getDevices` returns the legacy device map,
+         * which carries the full probe-with-temperature rows that
+         * AddProbeFlow needs. */
+        window.ActiveSessionView.mount(activeCookPlaceholder, {
+          send: sendWs,
+          onMessage: subscribeWsMessage,
+          generateRequestId: generateRequestId,
+          getDevices: function () { return devices; },
+          temperatureUnit: "C",
+        });
         activeSessionViewMounted = true;
       }
       return;

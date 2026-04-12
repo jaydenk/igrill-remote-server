@@ -15,9 +15,12 @@
  *   3. Probe cards grid  -- one card per targeted probe with current
  *                           temp, target display, status chip, timer
  *                           stub (Task 8 wires the timer controls).
- *   4. Action row        -- Add Probe / Add Note / End Session buttons.
- *                           Task 7 leaves these as visual stubs;
- *                           Tasks 9/10/11 wire real behaviour.
+ *   4. Action row        -- Add Probe / Add Note / End Session buttons
+ *                           (Tasks 9, 10, 11). Clicking delegates to
+ *                           AddProbeFlow, NotesEditor, EndSessionFlow
+ *                           respectively; wiring is passed in via
+ *                           mount(target, {send, onMessage,
+ *                           generateRequestId, getDevices}).
  *
  * This module is intentionally self-contained. It reads state through
  * window.SessionStore.instance.getState() and sends session_update_request
@@ -315,8 +318,25 @@
   function createView() {
     var container = null;
     var unsubscribe = null;
+    var unsubscribeMessages = null;
     var tickInterval = null;
     var mounted = false;
+
+    /* Wiring injected by mount(target, options). Lets the legacy
+     * dashboard hand us its `send`, `onMessage`, `generateRequestId`,
+     * and a `getDevices()` snapshot function without the component
+     * needing to know how the WebSocket is owned. */
+    var wiring = {
+      send: null,
+      onMessage: null,
+      generateRequestId: null,
+      getDevices: null,
+      temperatureUnit: "C",
+    };
+
+    /* Tracks the currently-open NotesEditor instance so we can push
+     * live `session_notes_update` broadcasts into it. */
+    var openNotesEditor = null;
 
     /* DOM refs */
     var root = null;
@@ -329,6 +349,8 @@
     var chartHostEl = null;
     var chartEmptyEl = null;
     var probesGridEl = null;
+    var btnAddProbe = null;
+    var btnAddNote = null;
     var btnEndSession = null;
 
     /* Chart state */
@@ -444,6 +466,115 @@
       }
     }
 
+    /* --------------------------------------------------------------- */
+    /* Action-row handlers (Tasks 9, 10, 11)                            */
+    /* --------------------------------------------------------------- */
+
+    function ensureWiring() {
+      if (wiring.send && wiring.onMessage && wiring.generateRequestId) return true;
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[ActiveSessionView] action requires wiring: " +
+          "mount the view with {send, onMessage, generateRequestId} options."
+        );
+      }
+      return false;
+    }
+
+    function onAddProbeClick() {
+      if (!ensureWiring()) return;
+      if (!global.AddProbeFlow) {
+        if (typeof console !== "undefined") {
+          console.warn("[ActiveSessionView] AddProbeFlow not loaded");
+        }
+        return;
+      }
+      var state = getState();
+      var session = state.activeSession;
+      if (!session) return;
+      var devicesMap = (typeof wiring.getDevices === "function" && wiring.getDevices()) || {};
+      global.AddProbeFlow.open({
+        devices: devicesMap,
+        currentTargets: session.targets || [],
+        sessionDevices: state.devices || [],
+        send: wiring.send,
+        generateRequestId: wiring.generateRequestId,
+        onMessage: wiring.onMessage,
+        temperatureUnit: wiring.temperatureUnit || "C",
+      });
+    }
+
+    function onAddNoteClick() {
+      if (!ensureWiring()) return;
+      if (!global.NotesEditor) {
+        if (typeof console !== "undefined") {
+          console.warn("[ActiveSessionView] NotesEditor not loaded");
+        }
+        return;
+      }
+      var state = getState();
+      var session = state.activeSession;
+      if (!session) return;
+      var sessionId = session.id;
+
+      var handle = global.NotesEditor.open({
+        sessionId: sessionId,
+        initialBody: state.notes || "",
+        onSave: function (body) {
+          wiring.send({
+            v: 2,
+            type: "session_notes_update_request",
+            requestId: wiring.generateRequestId(),
+            payload: {
+              body: body,
+              sessionId: sessionId,
+            },
+          });
+        },
+      });
+
+      openNotesEditor = handle;
+
+      /* The NotesEditor doesn't notify us on close, so wrap its close
+       * function to clear our tracking ref. */
+      var originalClose = handle.close;
+      handle.close = function () {
+        openNotesEditor = null;
+        originalClose();
+      };
+    }
+
+    function onEndSessionClick() {
+      if (!ensureWiring()) return;
+      if (!global.EndSessionFlow) {
+        if (typeof console !== "undefined") {
+          console.warn("[ActiveSessionView] EndSessionFlow not loaded");
+        }
+        return;
+      }
+      global.EndSessionFlow.open({
+        send: wiring.send,
+        generateRequestId: wiring.generateRequestId,
+        onMessage: wiring.onMessage,
+      });
+    }
+
+    /* Listen for notes broadcasts so the open editor (if any) can be
+     * updated live when another client edits the same note. The
+     * reducer already updates `state.notes`; we mirror that into the
+     * NotesEditor textarea (it protects against clobbering unsaved
+     * local edits internally). */
+    function onWsMessage(msg) {
+      if (!msg || typeof msg !== "object") return;
+      if (!openNotesEditor) return;
+      if (msg.type !== "session_notes_update") return;
+      var payload = msg.payload || {};
+      var note = payload.note || payload;
+      if (note && typeof note.body === "string") {
+        try { openNotesEditor.setBody(note.body); } catch (_) { /* no-op */ }
+      }
+    }
+
     function buildSkeleton() {
       root = el("div", "asv-root");
 
@@ -507,18 +638,18 @@
 
       /* --- Actions --------------------------------------------------- */
       var actions = el("div", "asv-actions");
-      var btnAddProbe = el("button", "asv-btn", "Add Probe");
+      btnAddProbe = el("button", "asv-btn", "Add Probe");
       btnAddProbe.type = "button";
-      btnAddProbe.disabled = true;
-      btnAddProbe.title = "Coming in Task 9";
-      var btnAddNote = el("button", "asv-btn", "Add Note");
+      btnAddProbe.addEventListener("click", onAddProbeClick);
+      btnAddNote = el("button", "asv-btn", "Add Note");
       btnAddNote.type = "button";
-      btnAddNote.disabled = true;
-      btnAddNote.title = "Coming in Task 10";
+      btnAddNote.addEventListener("click", onAddNoteClick);
       btnEndSession = el("button", "asv-btn asv-btn-danger", "End Session");
       btnEndSession.type = "button";
-      btnEndSession.disabled = true;
-      btnEndSession.title = "Coming in Task 11";
+      btnEndSession.addEventListener("click", onEndSessionClick);
+      /* Buttons remain enabled by default; the handlers surface a
+       * console warning if wiring is missing, which only happens when
+       * the view is embedded somewhere outside the main dashboard. */
       actions.appendChild(btnAddProbe);
       actions.appendChild(btnAddNote);
       actions.appendChild(btnEndSession);
@@ -1141,9 +1272,18 @@
       tickTimers();
     }
 
-    function mount(target) {
+    function mount(target, options) {
       if (mounted) return;
       ensureStyles();
+      options = options || {};
+      wiring.send = typeof options.send === "function" ? options.send : null;
+      wiring.onMessage = typeof options.onMessage === "function" ? options.onMessage : null;
+      wiring.generateRequestId = typeof options.generateRequestId === "function"
+        ? options.generateRequestId
+        : null;
+      wiring.getDevices = typeof options.getDevices === "function" ? options.getDevices : null;
+      wiring.temperatureUnit = options.temperatureUnit === "F" ? "F" : "C";
+
       container = target;
       while (container.firstChild) container.removeChild(container.firstChild);
       buildSkeleton();
@@ -1151,6 +1291,9 @@
 
       if (global.SessionStore && global.SessionStore.instance) {
         unsubscribe = global.SessionStore.instance.subscribe(onStoreChange);
+      }
+      if (wiring.onMessage) {
+        unsubscribeMessages = wiring.onMessage(onWsMessage);
       }
       tickInterval = setInterval(onTick, 1000);
       global.addEventListener("resize", handleResize);
@@ -1161,9 +1304,17 @@
       if (!mounted) return;
       mounted = false;
       if (unsubscribe) { try { unsubscribe(); } catch (e) { /* no-op */ } unsubscribe = null; }
+      if (unsubscribeMessages) {
+        try { unsubscribeMessages(); } catch (e) { /* no-op */ }
+        unsubscribeMessages = null;
+      }
       if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
       global.removeEventListener("resize", handleResize);
       tearDownChart();
+      if (openNotesEditor) {
+        try { openNotesEditor.close(); } catch (_) { /* no-op */ }
+        openNotesEditor = null;
+      }
       if (container) {
         while (container.firstChild) container.removeChild(container.firstChild);
       }
