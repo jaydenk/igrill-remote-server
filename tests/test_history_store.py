@@ -19,6 +19,7 @@ async def test_start_session(store):
     )
     assert result["session_id"] is not None
     assert result["start_event"]["reason"] == "user"
+    assert result["start_event"]["devices"] == ["70:91:8F:00:00:01"]
     state = await store.get_session_state()
     assert state["current_session_id"] == result["session_id"]
 

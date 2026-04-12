@@ -79,6 +79,15 @@ class SimulationRunner:
         self._session_id = session_info["session_id"]
         session_start_ts = session_info["session_start_ts"]
 
+        # Broadcast session events so all connected clients (iOS, web) are notified
+        if session_info.get("end_event"):
+            await self.store.publish_event(
+                make_envelope("session_end", session_info["end_event"])
+            )
+        await self.store.publish_event(
+            make_envelope("session_start", session_info["start_event"])
+        )
+
         # Register targets
         targets = self._build_targets(probes)
         await self._history.save_targets(self._session_id, SIM_ADDRESS, targets)
@@ -124,8 +133,12 @@ class SimulationRunner:
         session_id = self._session_id
         ticks = self._tick
 
-        # End session
-        await self._history.end_session(reason="simulation_stopped")
+        # End session and broadcast event
+        end_result = await self._history.end_session(reason="simulation_stopped")
+        if end_result:
+            await self.store.publish_event(
+                make_envelope("session_end", end_result)
+            )
 
         # Mark device disconnected
         await self.store.upsert(SIM_ADDRESS, connected=False)

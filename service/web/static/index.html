@@ -3091,6 +3091,9 @@
           return resp.json();
         })
         .then(function () {
+          simRunning = false;
+          simSessionId = null;
+          updateSimUI();
           showSimFlash("Simulation stopped", false);
         })
         .catch(function (err) {
@@ -3113,6 +3116,9 @@
           return resp.json();
         })
         .then(function (data) {
+          simRunning = true;
+          simSessionId = data.sessionId || null;
+          updateSimUI();
           showSimFlash("Simulation started", false);
         })
         .catch(function (err) {

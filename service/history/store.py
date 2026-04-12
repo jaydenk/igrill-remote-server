@@ -172,6 +172,7 @@ class HistoryStore:
                 "sessionStartTs": now_ts,
                 "reason": reason,
                 "name": name,
+                "devices": addresses,
             }
 
             return {
