@@ -6,6 +6,9 @@
   <title>iGrill Remote</title>
   <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css">
   <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <!-- Session-first redesign state modules. See service/web/static/js/stores/. -->
+  <script src="/static/js/stores/sessionStore.js"></script>
+  <script src="/static/js/stores/rollingBuffer.js"></script>
   <style>
     :root {
       --bg-primary: #1a1a2e;
@@ -2220,6 +2223,23 @@
     var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     var url = protocol + "//" + window.location.host + "/ws";
     ws = new WebSocket(url);
+
+    /* Wire the new session-first state modules to this connection.
+     * They run in parallel with the legacy dashboard — no UI migration yet.
+     * See service/web/static/js/stores/. */
+    if (window.SessionStore && window.SessionStore.instance) {
+      window.SessionStore.instance.attachWebSocket(ws);
+    }
+    if (
+      window.RollingBuffer &&
+      window.RollingBuffer.instance &&
+      window.SessionStore &&
+      window.SessionStore.instance &&
+      !window._rollingBufferAttached
+    ) {
+      window.RollingBuffer.instance.attachToStore(window.SessionStore.instance);
+      window._rollingBufferAttached = true;
+    }
 
     ws.onopen = function () {
       reconnectAttempt = 0;
