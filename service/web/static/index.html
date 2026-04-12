@@ -19,6 +19,8 @@
       --text-secondary: #a0a0b8;
       --text-muted: #6c6c80;
       --accent: #e94560;
+      --brand: #935240;
+      --brand-tint: rgba(147, 82, 64, 0.18);
       --green: #4ade80;
       --red: #f87171;
       --yellow: #fbbf24;
@@ -114,9 +116,57 @@
       color: var(--text-primary);
     }
 
+    .tab-btn:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: -2px;
+    }
+
     .tab-btn.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
+      color: var(--brand);
+      border-bottom-color: var(--brand);
+    }
+
+    /* -- Cook tab placeholder ------------------------------------------- */
+
+    .cook-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 0.75rem;
+      padding: 3rem 1.5rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .cook-placeholder-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .cook-placeholder-body {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      max-width: 24rem;
+    }
+
+    .btn-brand {
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .btn-brand:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
+    }
+
+    /* Legacy DOM retained inside Cook tab for continuity with earlier
+       JS; hidden visually until Task 4/6/7/11 replaces the UI. */
+    .legacy-cook-scaffolding {
+      display: none;
     }
 
     /* -- Tab Content ---------------------------------------------------- */
@@ -977,74 +1027,91 @@
   </div>
 </header>
 
-<nav class="tab-bar">
-  <button class="tab-btn active" data-tab="live">Live</button>
-  <button class="tab-btn" data-tab="history">History</button>
-  <button class="tab-btn" data-tab="settings">Settings</button>
+<nav class="tab-bar" role="tablist" aria-label="Primary">
+  <button class="tab-btn active" data-tab="cook" role="tab" aria-selected="true" aria-controls="tab-cook" id="tab-btn-cook">Cook</button>
+  <button class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history" id="tab-btn-history">History</button>
+  <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings" id="tab-btn-settings">Settings</button>
 </nav>
 
 <!-- ================================================================== -->
-<!-- Live Tab                                                            -->
+<!-- Cook Tab (placeholder until Task 4 builds IdleCookView)             -->
 <!-- ================================================================== -->
-<div class="tab-content active" id="tab-live">
+<div class="tab-content active" id="tab-cook" role="tabpanel" aria-labelledby="tab-btn-cook">
 
-  <!-- Session Banner -->
-  <section>
-    <div class="section-title">Session</div>
-    <div class="session-banner" id="sessionBanner">
-      <div class="session-banner-idle" id="sessionIdle">
-        <p>No active session</p>
-        <div style="margin: 0.25rem 0;">
-          <input type="text" id="sessionNameInput" placeholder="Session name (optional)"
-                 class="form-input" style="width: 100%; max-width: 300px; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem;">
-        </div>
-        <button class="btn btn-primary" id="btnStartSession">Start Session</button>
-      </div>
-      <div class="session-banner-active" id="sessionActive" style="display:none;">
-        <div class="session-name" id="sessionName" style="display:none;"></div>
-        <div class="session-banner-active-row">
-          <div class="session-info">
-            <div class="session-stat">
-              <span class="session-stat-label">Duration</span>
-              <span class="session-stat-value" id="sessionDuration">&mdash;</span>
-            </div>
-            <div class="session-stat">
-              <span class="session-stat-label">Devices</span>
-              <span class="session-stat-value" id="sessionDeviceCount">0</span>
-            </div>
+  <!-- Placeholder shown until Task 4 replaces it with IdleCookView -->
+  <section class="cook-placeholder" id="cookPlaceholder">
+    <div class="cook-placeholder-title">Ready to cook</div>
+    <p class="cook-placeholder-body">
+      The new Cook experience is on the way. For now, manage devices and
+      simulation in Settings. Start Cook will wire up in the next update.
+    </p>
+    <button class="btn btn-brand" id="btnStartCookPlaceholder" disabled aria-disabled="true">Start Cook</button>
+  </section>
+
+  <!--
+    Legacy DOM retained so session/chart/device logic keeps functioning
+    without errors while the Cook view is rebuilt across Tasks 4–11.
+    Task 4 will replace this wholesale with IdleCookView.
+  -->
+  <div class="legacy-cook-scaffolding" aria-hidden="true">
+    <!-- Session Banner -->
+    <section>
+      <div class="section-title">Session</div>
+      <div class="session-banner" id="sessionBanner">
+        <div class="session-banner-idle" id="sessionIdle">
+          <p>No active session</p>
+          <div style="margin: 0.25rem 0;">
+            <input type="text" id="sessionNameInput" placeholder="Session name (optional)"
+                   class="form-input" style="width: 100%; max-width: 300px; padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 0.9rem;">
           </div>
-          <button class="btn btn-danger" id="btnEndSession">End Session</button>
+          <button class="btn btn-primary" id="btnStartSession">Start Session</button>
+        </div>
+        <div class="session-banner-active" id="sessionActive" style="display:none;">
+          <div class="session-name" id="sessionName" style="display:none;"></div>
+          <div class="session-banner-active-row">
+            <div class="session-info">
+              <div class="session-stat">
+                <span class="session-stat-label">Duration</span>
+                <span class="session-stat-value" id="sessionDuration">&mdash;</span>
+              </div>
+              <div class="session-stat">
+                <span class="session-stat-label">Devices</span>
+                <span class="session-stat-value" id="sessionDeviceCount">0</span>
+              </div>
+            </div>
+            <button class="btn btn-danger" id="btnEndSession">End Session</button>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Devices -->
-  <section>
-    <div class="section-title">Devices</div>
-    <div class="device-cards" id="deviceCards">
-      <div class="empty-state" id="emptyState">
-        <p>No devices discovered yet.</p>
-        <p>Waiting for data&hellip;</p>
+    <!-- Devices (moved visually into Settings > Connected Devices) -->
+    <section>
+      <div class="section-title">Devices</div>
+      <div class="device-cards" id="deviceCards">
+        <div class="empty-state" id="emptyState">
+          <p>No devices discovered yet.</p>
+          <p>Waiting for data&hellip;</p>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Charts (visible when session active) -->
-  <section class="charts-section" id="chartsSection">
-    <div class="section-title">Temperature Charts</div>
-    <div class="chart-container" id="combinedChartContainer">
-      <div class="chart-title">All Probes</div>
-      <div class="chart-wrapper" id="combinedChartWrapper"></div>
-    </div>
-    <div class="per-probe-charts" id="perProbeCharts"></div>
-  </section>
+    <!-- Charts (visible when session active) -->
+    <section class="charts-section" id="chartsSection">
+      <div class="section-title">Temperature Charts</div>
+      <div class="chart-container" id="combinedChartContainer">
+        <div class="chart-title">All Probes</div>
+        <div class="chart-wrapper" id="combinedChartWrapper"></div>
+      </div>
+      <div class="per-probe-charts" id="perProbeCharts"></div>
+    </section>
+  </div>
 </div>
 
 <!-- ================================================================== -->
 <!-- History Tab                                                         -->
 <!-- ================================================================== -->
-<div class="tab-content" id="tab-history">
+<div class="tab-content" id="tab-history" role="tabpanel" aria-labelledby="tab-btn-history">
   <div class="history-layout">
     <!-- Session List -->
     <div class="history-list-pane" id="historyListPane">
@@ -1075,7 +1142,7 @@
 <!-- ================================================================== -->
 <!-- Settings Tab                                                        -->
 <!-- ================================================================== -->
-<div class="tab-content" id="tab-settings">
+<div class="tab-content" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings">
 
   <!-- Connected Devices -->
   <section class="settings-section">
@@ -1250,28 +1317,62 @@
   var modalTargetList = document.getElementById("modalTargetList");
 
   /* ------------------------------------------------------------------ */
-  /* Tab switching                                                       */
+  /* Tab switching (hash-routed: #cook | #history | #settings)           */
   /* ------------------------------------------------------------------ */
 
+  var VALID_TABS = ["cook", "history", "settings"];
+  var DEFAULT_TAB = "cook";
   var tabButtons = document.querySelectorAll(".tab-btn");
   var tabPanels  = document.querySelectorAll(".tab-content");
 
+  function tabFromHash() {
+    var raw = (window.location.hash || "").replace(/^#/, "").toLowerCase();
+    return VALID_TABS.indexOf(raw) >= 0 ? raw : DEFAULT_TAB;
+  }
+
+  function setActiveTab(target, opts) {
+    opts = opts || {};
+    if (VALID_TABS.indexOf(target) < 0) target = DEFAULT_TAB;
+
+    tabButtons.forEach(function (b) {
+      var isActive = b.getAttribute("data-tab") === target;
+      b.classList.toggle("active", isActive);
+      b.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+    tabPanels.forEach(function (p) { p.classList.remove("active"); });
+    var panel = document.getElementById("tab-" + target);
+    if (panel) panel.classList.add("active");
+
+    /* Keep URL hash in sync without creating history spam. */
+    if (opts.updateHash !== false) {
+      var desired = "#" + target;
+      if (window.location.hash !== desired) {
+        /* replaceState avoids cluttering back-button history on tab clicks. */
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", desired);
+        } else {
+          window.location.hash = desired;
+        }
+      }
+    }
+
+    if (target === "history") {
+      fetchHistorySessions();
+    } else if (target === "settings") {
+      refreshSettingsDevices();
+      fetchServerHealth();
+    }
+  }
+
   tabButtons.forEach(function (btn) {
     btn.addEventListener("click", function () {
-      var target = btn.getAttribute("data-tab");
-      tabButtons.forEach(function (b) { b.classList.remove("active"); });
-      tabPanels.forEach(function (p) { p.classList.remove("active"); });
-      btn.classList.add("active");
-      var panel = document.getElementById("tab-" + target);
-      if (panel) panel.classList.add("active");
-
-      if (target === "history") {
-        fetchHistorySessions();
-      } else if (target === "settings") {
-        refreshSettingsDevices();
-        fetchServerHealth();
-      }
+      setActiveTab(btn.getAttribute("data-tab"));
     });
+  });
+
+  window.addEventListener("hashchange", function () {
+    /* Don't rewrite the hash we just read from. */
+    setActiveTab(tabFromHash(), { updateHash: false });
   });
 
   /* ------------------------------------------------------------------ */
@@ -3281,6 +3382,8 @@
 
   renderSessionBanner();
   renderDevices();
+  /* Honour any hash set on first paint (e.g. a deep link to #settings). */
+  setActiveTab(tabFromHash());
   connect();
 
 })();
