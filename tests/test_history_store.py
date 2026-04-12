@@ -1172,3 +1172,111 @@ async def test_discard_session_on_ended_session(store, sample_address):
         "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
     )
     assert (await cursor.fetchone())[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# find_expired_running_countdowns (Task 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_expired_running_countdowns_respects_filters(
+    store, sample_address, monkeypatch,
+):
+    """find_expired_running_countdowns must only return timers that are:
+
+      * mode='count_down'
+      * running (started_at set, paused_at null)
+      * not completed
+      * have a duration_secs set
+      * whose effective elapsed time >= duration_secs
+
+    Each probe exercises a distinct exclusion; probe 6 is the positive case.
+    """
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Anchor on real now so find_expired_running_countdowns (which uses real
+    # now) computes positive elapsed seconds against t_old.
+    t_now = datetime.now(timezone.utc)
+    t_old = t_now - timedelta(seconds=3600)
+
+    # Drive now_iso_utc() so started_at values are predictable. Order matches
+    # the mutation sequence below — start/pause/complete each call now once.
+    times = iter([
+        t_now, t_now + timedelta(seconds=5),           # probe 1 start, pause
+        t_now, t_now + timedelta(seconds=1),           # probe 2 start, complete
+        t_now,                                         # probe 3 start
+        t_now,                                         # probe 4 start
+        t_now,                                         # probe 5 start
+        t_old,                                         # probe 6 start (long ago)
+    ])
+
+    def fake_now_iso():
+        return next(times).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    # Probe 1: paused running count_down — excluded (paused_at set)
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    await store.pause_timer(sid, sample_address, 1)
+
+    # Probe 2: completed count_down — excluded (completed_at set)
+    await store.upsert_timer(sid, sample_address, 2, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 2)
+    await store.complete_timer(sid, sample_address, 2)
+
+    # Probe 3: count_up timer — excluded (mode != count_down)
+    await store.upsert_timer(sid, sample_address, 3, mode="count_up", duration_secs=None)
+    await store.start_timer(sid, sample_address, 3)
+
+    # Probe 4: running count_down, duration is 10 hours — not yet expired
+    await store.upsert_timer(sid, sample_address, 4, mode="count_down", duration_secs=36000)
+    await store.start_timer(sid, sample_address, 4)
+
+    # Probe 5: count_down with null duration — excluded
+    await store.upsert_timer(sid, sample_address, 5, mode="count_down", duration_secs=None)
+    await store.start_timer(sid, sample_address, 5)
+
+    # Probe 6: running count_down started an hour ago, duration 60s — SHOULD expire
+    await store.upsert_timer(sid, sample_address, 6, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 6)
+
+    # Restore real now so find_expired_running_countdowns sees real elapsed.
+    monkeypatch.setattr(
+        store_mod, "now_iso_utc",
+        lambda: datetime.now(timezone.utc).isoformat(),
+    )
+
+    expired = await store.find_expired_running_countdowns()
+    probe_indices = sorted(r["probe_index"] for r in expired)
+    assert probe_indices == [6], (
+        f"Expected only probe 6 expired, got {probe_indices}"
+    )
+
+    row = expired[0]
+    assert row["mode"] == "count_down"
+    assert row["duration_secs"] == 60
+    assert row["started_at"] is not None
+    assert row["paused_at"] is None
+    assert row["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_find_expired_running_countdowns_empty_when_nothing_matches(
+    store, sample_address,
+):
+    """Base cases: no timers, and a count_down that has been upserted but
+    never started, both yield an empty list."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.find_expired_running_countdowns() == []
+
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    # Never started — not expired.
+    assert await store.find_expired_running_countdowns() == []

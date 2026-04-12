@@ -1129,6 +1129,49 @@ class HistoryStore:
             rows = await cursor.fetchall()
             return [self._timer_row_to_dict(r) for r in rows]
 
+    async def find_expired_running_countdowns(self) -> list[dict]:
+        """Return all running count_down timer rows whose effective elapsed
+        time has reached or exceeded ``duration_secs``.
+
+        A row qualifies when:
+
+        * ``mode = 'count_down'``
+        * ``started_at`` is set, ``paused_at`` is null, ``completed_at`` is null
+        * ``duration_secs`` is not null
+        * ``accumulated_secs + (now - started_at) >= duration_secs``
+
+        The SQL-side filter narrows to running, un-completed countdowns with
+        a duration; the final arithmetic comparison is done in Python for
+        clarity (no SQL julianday tricks).
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT session_id, address, probe_index, mode, duration_secs, "
+                "started_at, paused_at, accumulated_secs, completed_at "
+                "FROM session_timers "
+                "WHERE mode = 'count_down' "
+                "AND started_at IS NOT NULL "
+                "AND paused_at IS NULL "
+                "AND completed_at IS NULL "
+                "AND duration_secs IS NOT NULL"
+            )
+            rows = await cursor.fetchall()
+
+            now_dt = parse_iso(now_iso_utc())
+            if now_dt is None:
+                return []
+
+            expired: list[dict] = []
+            for row in rows:
+                started_dt = parse_iso(row["started_at"])
+                if started_dt is None:
+                    continue
+                elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+                effective = (row["accumulated_secs"] or 0) + elapsed
+                if effective >= row["duration_secs"]:
+                    expired.append(self._timer_row_to_dict(row))
+            return expired
+
     # ------------------------------------------------------------------
     # Session notes CRUD
     # ------------------------------------------------------------------

@@ -810,3 +810,106 @@ async def test_ws_probe_timer_start_without_upsert(client):
             msg = await ws.receive_json()
         assert msg.get("type") == "error"
         assert msg["payload"]["code"] == "timer_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Countdown auto-completion (Task 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_countdown_completer_auto_completes_and_broadcasts(client):
+    """When a running count_down timer's effective elapsed exceeds
+    duration_secs, the completer tick() must mark it complete AND broadcast
+    probe_timer_update exactly once — observable by a second WebSocket
+    client."""
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+    from service.timers import CountdownCompleter
+
+    await _seed_device(client)
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, client.ws_connect("/ws") as ws_b:
+            await _start_session_for_timer(ws_a)
+
+            # Upsert a 1-second count_down and start it.
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "c1",
+                "payload": {
+                    "address": _TEST_DEVICE,
+                    "probe_index": 1,
+                    "action": "upsert",
+                    "mode": "count_down",
+                    "duration_secs": 1,
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "probe_timer_ack":
+                msg = await ws_a.receive_json()
+
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "c2",
+                "payload": {
+                    "address": _TEST_DEVICE,
+                    "probe_index": 1,
+                    "action": "start",
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "probe_timer_ack":
+                msg = await ws_a.receive_json()
+
+            # Drain any already-queued probe_timer_update broadcasts on ws_b
+            # from the upsert + start (so we can cleanly detect the
+            # auto-complete broadcast below).
+            async def _drain(ws, timeout=0.3):
+                try:
+                    while True:
+                        await _asyncio.wait_for(ws.receive_json(), timeout=timeout)
+                except _asyncio.TimeoutError:
+                    pass
+
+            await _drain(ws_b)
+
+            # Wait slightly longer than the 1-second duration.
+            await _asyncio.sleep(1.2)
+
+            # Run one tick of the completer directly (deterministic, no loop).
+            completer = CountdownCompleter(
+                client.app["history"], client.app["store"],
+            )
+            completed = await completer.tick()
+            assert completed == 1, (
+                f"Expected one timer auto-completed, got {completed}"
+            )
+
+            # ws_b should now see the probe_timer_update broadcast.
+            async def _wait_for_broadcast(ws, wanted_type):
+                for _ in range(20):
+                    try:
+                        m = await _asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                    except _asyncio.TimeoutError:
+                        return None
+                    if m.get("type") == wanted_type:
+                        return m
+                return None
+
+            broadcast = await _wait_for_broadcast(ws_b, "probe_timer_update")
+            assert broadcast is not None, (
+                "ws_b did not observe auto-complete probe_timer_update broadcast"
+            )
+            payload = broadcast["payload"]
+            assert payload["probe_index"] == 1
+            assert payload["completed_at"] is not None
+            assert payload["started_at"] is None
+            assert payload["paused_at"] is not None
+
+            # Second tick should be a no-op (timer is already completed).
+            assert await completer.tick() == 0
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
