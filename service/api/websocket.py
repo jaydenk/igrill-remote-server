@@ -32,6 +32,12 @@ _SESSION_CONTROL_TYPES = frozenset({
     "session_add_device_request",
     "session_update_request",
     "target_update_request",
+    # Session-first redesign request types (handlers wired in Tasks 9-11).
+    # Listed here so they share the session-control rate limit even before
+    # their handlers exist; unknown types still fall through to "unknown_type".
+    "session_discard_request",
+    "probe_timer_request",
+    "session_notes_update_request",
 })
 
 
@@ -273,6 +279,9 @@ async def _handle_status(ctx: _MessageContext) -> None:
     if current_sid is not None:
         meta = await ctx.history.get_session_metadata(current_sid)
         status_payload["currentSessionName"] = meta["name"] if meta else None
+        status_payload["currentTargetDurationSecs"] = (
+            meta["target_duration_secs"] if meta else None
+        )
     LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
              ctx.peer, device_state, has_data, session_state.get("current_session_id"))
     await send_envelope(ctx.ws, "status", status_payload, request_id=ctx.request_id)
@@ -427,8 +436,32 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
     name = ctx.payload.get("name")
     if name is not None:
         name = str(name)[:200]  # Truncate to prevent abuse
+
+    raw_target_duration = ctx.payload.get("targetDurationSecs")
+    target_duration_secs: Optional[int] = None
+    if raw_target_duration is not None:
+        try:
+            target_duration_secs = int(raw_target_duration)
+        except (TypeError, ValueError):
+            await send_error(
+                ctx.ws, "invalid_payload",
+                "targetDurationSecs must be an integer.",
+                request_id=ctx.request_id,
+            )
+            return
+        if target_duration_secs <= 0:
+            await send_error(
+                ctx.ws, "invalid_payload",
+                "targetDurationSecs must be a positive integer.",
+                request_id=ctx.request_id,
+            )
+            return
+
     session_info = await ctx.history.start_session(
-        addresses=device_addresses, reason="user", name=name
+        addresses=device_addresses,
+        reason="user",
+        name=name,
+        target_duration_secs=target_duration_secs,
     )
 
     if session_info.get("end_event"):
@@ -454,6 +487,7 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         "sessionId": new_session_id,
         "sessionStartTs": session_info["session_start_ts"],
         "name": name,
+        "targetDurationSecs": target_duration_secs,
         "devices": device_addresses,
         "targets": [t.to_dict() for t in targets],
     }
@@ -494,6 +528,181 @@ async def _handle_session_end(ctx: _MessageContext) -> None:
             "endedAt": result["sessionEndTs"],
         },
         request_id=ctx.request_id,
+    )
+
+
+async def _handle_session_discard(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to discard sessions",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    deleted = await ctx.history.discard_session(current_sid)
+    if not deleted:
+        await send_error(
+            ctx.ws, "session_not_found",
+            f"Session {current_sid} does not exist.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    ctx.evaluator.clear_session(current_sid)
+
+    # Stop simulation if a simulated session was in progress.
+    if ctx.simulator and ctx.simulator.is_running:
+        await ctx.simulator.stop()
+
+    await ctx.store.publish_event(
+        make_envelope("session_discarded", {"sessionId": current_sid})
+    )
+
+    await send_envelope(
+        ctx.ws, "session_discard_ack",
+        {"ok": True, "sessionId": current_sid},
+        request_id=ctx.request_id,
+    )
+
+
+async def _handle_probe_timer(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to modify probe timers",
+            request_id=ctx.request_id,
+        )
+        return
+
+    address = ctx.payload.get("address")
+    probe_index = ctx.payload.get("probe_index")
+    action = ctx.payload.get("action")
+
+    if not isinstance(address, str) or not address:
+        await send_error(
+            ctx.ws, "invalid_payload", "address is required.",
+            request_id=ctx.request_id,
+        )
+        return
+    if not isinstance(probe_index, int):
+        await send_error(
+            ctx.ws, "invalid_payload", "probe_index must be an integer.",
+            request_id=ctx.request_id,
+        )
+        return
+    if not isinstance(action, str):
+        await send_error(
+            ctx.ws, "invalid_payload", "action is required.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_state = await ctx.history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        await send_error(
+            ctx.ws, "no_active_session", "No session is currently active.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    try:
+        if action == "upsert":
+            mode = ctx.payload.get("mode")
+            duration_secs = ctx.payload.get("duration_secs")
+            if mode == "count_down" and duration_secs is None:
+                await send_error(
+                    ctx.ws, "invalid_mode",
+                    "duration_secs is required when mode is count_down.",
+                    request_id=ctx.request_id,
+                )
+                return
+            row = await ctx.history.upsert_timer(
+                current_sid, address, probe_index, mode, duration_secs,
+            )
+        elif action == "start":
+            row = await ctx.history.start_timer(current_sid, address, probe_index)
+        elif action == "pause":
+            row = await ctx.history.pause_timer(current_sid, address, probe_index)
+        elif action == "resume":
+            row = await ctx.history.resume_timer(current_sid, address, probe_index)
+        elif action == "reset":
+            row = await ctx.history.reset_timer(current_sid, address, probe_index)
+        else:
+            await send_error(
+                ctx.ws, "invalid_action",
+                f"Unsupported probe_timer action: {action}",
+                request_id=ctx.request_id,
+            )
+            return
+    except ValueError as exc:
+        message = str(exc)
+        if action == "upsert" and "mode must be" in message:
+            code = "invalid_mode"
+        else:
+            code = "timer_not_found"
+        await send_error(ctx.ws, code, message, request_id=ctx.request_id)
+        return
+
+    await ctx.store.publish_event(make_envelope("probe_timer_update", row))
+
+    await send_envelope(
+        ctx.ws, "probe_timer_ack", row, request_id=ctx.request_id,
+    )
+
+
+async def _handle_session_notes_update(ctx: _MessageContext) -> None:
+    if not ctx.authorized:
+        await send_error(
+            ctx.ws, "unauthorized", "Not allowed to update session notes",
+            request_id=ctx.request_id,
+        )
+        return
+
+    body = ctx.payload.get("body")
+    if not isinstance(body, str):
+        await send_error(
+            ctx.ws, "invalid_payload", "body is required and must be a string.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    session_id = ctx.payload.get("sessionId")
+    if session_id is None:
+        session_state = await ctx.history.get_session_state()
+        session_id = session_state.get("current_session_id")
+        if session_id is None:
+            await send_error(
+                ctx.ws, "no_session_specified",
+                "No sessionId provided and no active session.",
+                request_id=ctx.request_id,
+            )
+            return
+    else:
+        session_id = str(session_id)
+
+    if not await ctx.history.session_exists(session_id):
+        await send_error(
+            ctx.ws, "session_not_found",
+            f"Session {session_id} does not exist.",
+            request_id=ctx.request_id,
+        )
+        return
+
+    row = await ctx.history.upsert_primary_note(session_id, body)
+
+    await ctx.store.publish_event(make_envelope("session_notes_update", row))
+
+    await send_envelope(
+        ctx.ws, "session_notes_update_ack", row, request_id=ctx.request_id,
     )
 
 
@@ -641,9 +850,12 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "history_request": _handle_history,
     "session_start_request": _handle_session_start,
     "session_end_request": _handle_session_end,
+    "session_discard_request": _handle_session_discard,
     "session_update_request": _handle_session_update,
     "target_update_request": _handle_target_update,
     "session_add_device_request": _handle_session_add_device,
+    "probe_timer_request": _handle_probe_timer,
+    "session_notes_update_request": _handle_session_notes_update,
 }
 
 

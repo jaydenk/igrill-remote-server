@@ -17,6 +17,7 @@ from service.alerts.evaluator import AlertEvaluator
 from service.api.routes import setup_routes
 from service.api.websocket import WebSocketHub, broadcast_readings, broadcast_events
 from service.push.service import PushService
+from service.timers import countdown_completer_loop
 from service.web.dashboard import setup_dashboard
 
 LOG = logging.getLogger("igrill")
@@ -140,6 +141,7 @@ async def run() -> None:
         asyncio.create_task(broadcast_readings(app)),
         asyncio.create_task(broadcast_events(app)),
         asyncio.create_task(manager.scan_loop()),
+        asyncio.create_task(countdown_completer_loop(app)),
     ]
 
     stop = asyncio.Event()

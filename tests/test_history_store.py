@@ -350,6 +350,113 @@ async def test_recover_orphaned_sessions(tmp_db, sample_address):
 
 
 @pytest.mark.asyncio
+async def test_recover_orphaned_sessions_handles_partial_discard(
+    store, sample_address, monkeypatch
+):
+    """A crash mid-discard must leave the database in a consistent state.
+
+    ``discard_session`` performs its deletes inside a single BEGIN/COMMIT
+    transaction wrapped in a try/except that issues ROLLBACK on failure.
+    If a crash prevents the commit, every child-table DELETE is rolled
+    back atomically by SQLite — so the session row and its children
+    remain intact. On startup, ``recover_orphaned_sessions`` should then
+    close the still-active session as a normal orphan
+    (``end_reason="server_restart"``).
+
+    This test encodes that guarantee end-to-end in a single connection
+    (equivalent to crash + restart, but simpler to express):
+
+      1. Start a session and write some child rows.
+      2. Patch ``_conn.commit`` so ``discard_session`` raises on commit —
+         the except branch issues ROLLBACK, unwinding every DELETE.
+      3. Verify all session data is still on disk (rollback was atomic).
+      4. Call ``recover_orphaned_sessions`` to simulate the post-restart
+         startup hook and verify it ends the session normally.
+    """
+    from service.models.session import TargetConfig
+
+    # 1. Populate a session with data to make rollback observable.
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 72.5}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+    await store.save_targets(
+        sid,
+        sample_address,
+        [TargetConfig(probe_index=1, mode="fixed", target_value=74.0)],
+    )
+    await store.upsert_primary_note(sid, "before crash")
+
+    # Sanity — data exists before the simulated crash.
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    # 2. Patch commit to raise — simulates a crash between the final
+    #    DELETE and the COMMIT. The except branch inside discard_session
+    #    issues ROLLBACK, which undoes every DELETE atomically.
+    original_commit = store._conn.commit
+
+    async def failing_commit():
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(store._conn, "commit", failing_commit)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await store.discard_session(sid)
+
+    # Restore commit so subsequent operations work normally. This
+    # represents the fresh process that comes up after a real crash —
+    # SQLite would roll back any uncommitted txn on reconnect; here the
+    # in-process ROLLBACK inside discard_session's except block already
+    # cleaned it up.
+    monkeypatch.setattr(store._conn, "commit", original_commit)
+
+    # 3. Every child row must still be present (rollback was atomic).
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    cursor = await store._conn.execute(
+        "SELECT id, ended_at FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    # Session is still active (ended_at IS NULL) — it looks like an
+    # orphan to recovery.
+    assert row["ended_at"] is None
+
+    # The discard raised, so in-memory state is (correctly) untouched;
+    # reset it to simulate a fresh process after restart where no
+    # session is loaded yet.
+    store._current_session_id = None
+    store._current_session_start_ts = None
+
+    # 4. Run recovery — the still-active session must be closed with
+    #    end_reason="server_restart". Child data remains intact.
+    await store.recover_orphaned_sessions()
+
+    sessions = await store.list_sessions(limit=10)
+    assert len(sessions) == 1
+    assert sessions[0]["sessionId"] == sid
+    assert sessions[0]["endReason"] == "server_restart"
+
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+
+@pytest.mark.asyncio
 async def test_get_history_items_with_time_filter(store, sample_address):
     """get_history_items should filter by since_ts and until_ts."""
     from datetime import datetime, timezone, timedelta
@@ -388,6 +495,435 @@ async def test_get_history_items_with_limit(store, sample_address):
     assert len(items) == 3
 
 
+# ---------------------------------------------------------------------------
+# Session timers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_timer_creates_paused_initial(store, sample_address):
+    """upsert_timer should create a paused-initial row (all runtime fields null/0)."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    row = await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=900)
+    assert row["session_id"] == sid
+    assert row["address"] == sample_address
+    assert row["probe_index"] == 1
+    assert row["mode"] == "count_down"
+    assert row["duration_secs"] == 900
+    assert row["started_at"] is None
+    assert row["paused_at"] is None
+    assert row["accumulated_secs"] == 0
+    assert row["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_timer_replaces_existing_row(store, sample_address):
+    """A second upsert resets runtime state and updates mode/duration."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    # Now re-upsert
+    row = await store.upsert_timer(sid, sample_address, 1, mode="count_up", duration_secs=None)
+    assert row["mode"] == "count_up"
+    assert row["duration_secs"] is None
+    assert row["started_at"] is None
+    assert row["paused_at"] is None
+    assert row["accumulated_secs"] == 0
+    assert row["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_timer_requires_active_session(store, sample_address):
+    """upsert_timer on a historical (ended) session should raise."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.end_session(reason="user")
+
+    with pytest.raises(ValueError, match="active session"):
+        await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+
+
+@pytest.mark.asyncio
+async def test_upsert_timer_unknown_session(store, sample_address):
+    """Upsert against a current-session-id that isn't in sessions should raise."""
+    # No active session at all
+    with pytest.raises(ValueError, match="active session"):
+        await store.upsert_timer("nonexistent", sample_address, 1, mode="count_down")
+
+
+@pytest.mark.asyncio
+async def test_start_timer_sets_started_at(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    row = await store.start_timer(sid, sample_address, 1)
+    assert row["started_at"] is not None
+    assert row["paused_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_timer_idempotent(store, sample_address):
+    """Calling start_timer twice should not reset started_at."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+
+    row1 = await store.start_timer(sid, sample_address, 1)
+    row2 = await store.start_timer(sid, sample_address, 1)
+    assert row1["started_at"] == row2["started_at"]
+
+
+@pytest.mark.asyncio
+async def test_start_timer_missing_row(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    with pytest.raises(ValueError, match="Timer not found"):
+        await store.start_timer(sid, sample_address, 1)
+
+
+@pytest.mark.asyncio
+async def test_start_timer_requires_active_session(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.end_session(reason="user")
+    with pytest.raises(ValueError, match="active session"):
+        await store.start_timer(sid, sample_address, 1)
+
+
+@pytest.mark.asyncio
+async def test_pause_timer_accumulates_elapsed(store, sample_address, monkeypatch):
+    """Pausing a running timer should add integer-second elapsed to accumulated_secs."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=600)
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    times = [t0, t0 + timedelta(seconds=30)]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    await store.start_timer(sid, sample_address, 1)
+    row = await store.pause_timer(sid, sample_address, 1)
+
+    assert row["started_at"] is None
+    assert row["paused_at"] is not None
+    assert row["accumulated_secs"] == 30
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_pause_accumulates(store, sample_address, monkeypatch):
+    """A pause->resume->pause cycle should sum both running intervals."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=600)
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    # start, pause (30s later), resume (60s later), pause (75s later)
+    times = [
+        t0,
+        t0 + timedelta(seconds=30),
+        t0 + timedelta(seconds=60),
+        t0 + timedelta(seconds=75),
+    ]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    await store.start_timer(sid, sample_address, 1)
+    await store.pause_timer(sid, sample_address, 1)
+    await store.resume_timer(sid, sample_address, 1)
+    row = await store.pause_timer(sid, sample_address, 1)
+
+    # First interval: 30s; second interval: 75-60 = 15s; total = 45s
+    assert row["accumulated_secs"] == 45
+
+
+@pytest.mark.asyncio
+async def test_pause_timer_noop_when_not_running(store, sample_address):
+    """Pausing a never-started or already-paused timer returns the row unchanged."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+
+    # Never started
+    row = await store.pause_timer(sid, sample_address, 1)
+    assert row["paused_at"] is None
+    assert row["accumulated_secs"] == 0
+
+    # Already paused
+    await store.start_timer(sid, sample_address, 1)
+    paused = await store.pause_timer(sid, sample_address, 1)
+    paused_at_first = paused["paused_at"]
+    again = await store.pause_timer(sid, sample_address, 1)
+    assert again["paused_at"] == paused_at_first
+    assert again["accumulated_secs"] == paused["accumulated_secs"]
+
+
+@pytest.mark.asyncio
+async def test_resume_timer_clears_paused(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    await store.pause_timer(sid, sample_address, 1)
+    row = await store.resume_timer(sid, sample_address, 1)
+    assert row["paused_at"] is None
+    assert row["started_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_timer_noop_when_not_paused(store, sample_address):
+    """Resuming an un-paused timer returns the current row unchanged."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+
+    # Never started
+    row = await store.resume_timer(sid, sample_address, 1)
+    assert row["started_at"] is None
+    assert row["paused_at"] is None
+
+    # Running
+    started = await store.start_timer(sid, sample_address, 1)
+    again = await store.resume_timer(sid, sample_address, 1)
+    assert again["started_at"] == started["started_at"]
+
+
+@pytest.mark.asyncio
+async def test_reset_timer_clears_all_runtime_fields(store, sample_address):
+    """reset_timer clears started/paused/completed and zeros accumulated_secs."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    await store.complete_timer(sid, sample_address, 1)
+
+    row = await store.reset_timer(sid, sample_address, 1)
+    assert row["started_at"] is None
+    assert row["paused_at"] is None
+    assert row["completed_at"] is None
+    assert row["accumulated_secs"] == 0
+    # mode + duration preserved
+    assert row["mode"] == "count_down"
+    assert row["duration_secs"] == 60
+
+
+@pytest.mark.asyncio
+async def test_complete_timer_sets_completed_and_paused(store, sample_address, monkeypatch):
+    """complete_timer sets both completed_at and paused_at, accumulates elapsed."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=600)
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    times = [t0, t0 + timedelta(seconds=42)]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    await store.start_timer(sid, sample_address, 1)
+    row = await store.complete_timer(sid, sample_address, 1)
+
+    assert row["completed_at"] is not None
+    assert row["paused_at"] is not None
+    assert row["started_at"] is None
+    assert row["accumulated_secs"] == 42
+
+
+@pytest.mark.asyncio
+async def test_complete_timer_preserves_existing_completed_at(store, sample_address):
+    """A second complete_timer call should not overwrite completed_at."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+
+    first = await store.complete_timer(sid, sample_address, 1)
+    second = await store.complete_timer(sid, sample_address, 1)
+    assert first["completed_at"] == second["completed_at"]
+
+
+@pytest.mark.asyncio
+async def test_reset_after_complete_clears_completed_at(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    await store.complete_timer(sid, sample_address, 1)
+
+    row = await store.reset_timer(sid, sample_address, 1)
+    assert row["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_timers_empty_and_populated(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    timers = await store.get_timers(sid)
+    assert timers == []
+
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.upsert_timer(sid, sample_address, 2, mode="count_up", duration_secs=None)
+
+    timers = await store.get_timers(sid)
+    assert len(timers) == 2
+    probe_indices = sorted(t["probe_index"] for t in timers)
+    assert probe_indices == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_get_timers_works_on_historical_session(store, sample_address):
+    """get_timers must work for a session that is no longer active."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.end_session(reason="user")
+
+    timers = await store.get_timers(sid)
+    assert len(timers) == 1
+    assert timers[0]["mode"] == "count_down"
+
+
+@pytest.mark.asyncio
+async def test_timer_mutations_blocked_on_historical_session(store, sample_address):
+    """All mutating timer ops should reject non-active sessions."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.end_session(reason="user")
+
+    for fn in (
+        store.start_timer,
+        store.pause_timer,
+        store.resume_timer,
+        store.reset_timer,
+        store.complete_timer,
+    ):
+        with pytest.raises(ValueError, match="active session"):
+            await fn(sid, sample_address, 1)
+
+
+@pytest.mark.asyncio
+async def test_reset_timer_missing_row(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    with pytest.raises(ValueError, match="Timer not found"):
+        await store.reset_timer(sid, sample_address, 1)
+
+
+@pytest.mark.asyncio
+async def test_complete_timer_missing_row(store, sample_address):
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    with pytest.raises(ValueError, match="Timer not found"):
+        await store.complete_timer(sid, sample_address, 1)
+
+
+@pytest.mark.asyncio
+async def test_upsert_timer_rejects_invalid_mode(store, sample_address):
+    """upsert_timer must reject any mode other than count_up / count_down."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    with pytest.raises(ValueError, match="count_up.*count_down"):
+        await store.upsert_timer(sid, sample_address, 1, mode="stopwatch", duration_secs=60)
+
+
+@pytest.mark.asyncio
+async def test_complete_timer_on_paused_preserves_paused_at(
+    store, sample_address, monkeypatch
+):
+    """Completing an already-paused timer must leave paused_at untouched."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=600)
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    # start, pause (20s later), complete (50s later)
+    times = [
+        t0,
+        t0 + timedelta(seconds=20),
+        t0 + timedelta(seconds=50),
+    ]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    await store.start_timer(sid, sample_address, 1)
+    paused = await store.pause_timer(sid, sample_address, 1)
+    paused_at_before = paused["paused_at"]
+    accum_before = paused["accumulated_secs"]
+
+    completed = await store.complete_timer(sid, sample_address, 1)
+    assert completed["completed_at"] is not None
+    # paused_at and accumulated_secs must be preserved (timer wasn't running)
+    assert completed["paused_at"] == paused_at_before
+    assert completed["accumulated_secs"] == accum_before
+    assert completed["started_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_timer_on_paused_acts_as_resume(
+    store, sample_address, monkeypatch
+):
+    """start_timer on a paused timer resumes it, preserving accumulated_secs."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=600)
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    # start, pause (25s later), resume-via-start (40s later)
+    times = [
+        t0,
+        t0 + timedelta(seconds=25),
+        t0 + timedelta(seconds=40),
+    ]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    await store.start_timer(sid, sample_address, 1)
+    paused = await store.pause_timer(sid, sample_address, 1)
+    assert paused["accumulated_secs"] == 25
+
+    row = await store.start_timer(sid, sample_address, 1)
+    assert row["started_at"] is not None
+    assert row["paused_at"] is None
+    # accumulated_secs preserved from the pause
+    assert row["accumulated_secs"] == 25
+
+
 @pytest.mark.asyncio
 async def test_duplicate_seq_preserves_original(store, sample_address):
     """INSERT OR IGNORE should keep the first reading, not overwrite."""
@@ -409,3 +945,508 @@ async def test_duplicate_seq_preserves_original(store, sample_address):
     assert len(items) == 1
     assert items[0]["temperature"] == 72.5
     assert items[0]["battery"] == 85
+
+
+# ---------------------------------------------------------------------------
+# Session notes CRUD (Task 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_primary_note_returns_none_when_no_notes(store, sample_address):
+    """get_primary_note should return None for a session with no notes rows."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_primary_note(sid) is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_creates_new_row(store, sample_address):
+    """First upsert should INSERT a session_notes row with matching timestamps."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    row = await store.upsert_primary_note(sid, "first draft")
+    assert row["session_id"] == sid
+    assert row["body"] == "first draft"
+    assert row["id"] is not None
+    assert row["created_at"] is not None
+    assert row["updated_at"] is not None
+    # On INSERT, created_at and updated_at are set to the same value.
+    assert row["created_at"] == row["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_updates_existing_row(store, sample_address, monkeypatch):
+    """A second upsert should UPDATE the same row — preserving id and created_at,
+    bumping updated_at."""
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    t0 = datetime(2026, 4, 12, 10, 0, 0, tzinfo=timezone.utc)
+    times = [t0, t0 + timedelta(seconds=30)]
+
+    def fake_now_iso():
+        return times.pop(0).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    first = await store.upsert_primary_note(sid, "first")
+    second = await store.upsert_primary_note(sid, "second")
+
+    assert second["id"] == first["id"]
+    assert second["created_at"] == first["created_at"]
+    assert second["updated_at"] != first["updated_at"]
+    assert second["body"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_get_primary_note_returns_row_after_upsert(store, sample_address):
+    """get_primary_note should return the row created by upsert_primary_note."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    upserted = await store.upsert_primary_note(sid, "hello world")
+    fetched = await store.get_primary_note(sid)
+
+    assert fetched is not None
+    assert fetched == upserted
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_editable_after_session_ended(store, sample_address):
+    """Notes are editable on ENDED sessions — unlike timers, no active-session guard."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.upsert_primary_note(sid, "during session")
+    await store.end_session(reason="user")
+
+    # Still editable after end
+    row = await store.upsert_primary_note(sid, "after session")
+    assert row["body"] == "after session"
+
+    fetched = await store.get_primary_note(sid)
+    assert fetched["body"] == "after session"
+
+
+@pytest.mark.asyncio
+async def test_upsert_primary_note_dual_writes_sessions_notes(store, sample_address):
+    """After upsert, the legacy sessions.notes column should match body."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    await store.upsert_primary_note(sid, "legacy body 1")
+    cursor = await store._conn.execute(
+        "SELECT notes FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row["notes"] == "legacy body 1"
+
+    # Update path also dual-writes.
+    await store.upsert_primary_note(sid, "legacy body 2")
+    cursor = await store._conn.execute(
+        "SELECT notes FROM sessions WHERE id = ?", (sid,)
+    )
+    row = await cursor.fetchone()
+    assert row["notes"] == "legacy body 2"
+
+
+@pytest.mark.asyncio
+async def test_get_notes_empty_for_session_without_notes(store, sample_address):
+    """get_notes should return an empty list when no notes exist."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_notes(sid) == []
+
+
+@pytest.mark.asyncio
+async def test_get_notes_returns_all_in_created_at_order(store, sample_address):
+    """get_notes orders by created_at ASC, id ASC; primary note (earliest) first."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Insert two rows directly via SQL so we control created_at precisely,
+    # simulating the eventual multi-note future.
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES (?, ?, ?, ?)",
+        (sid, "2026-04-12T10:00:02+00:00", "2026-04-12T10:00:02+00:00", "second"),
+    )
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES (?, ?, ?, ?)",
+        (sid, "2026-04-12T10:00:01+00:00", "2026-04-12T10:00:01+00:00", "first"),
+    )
+    await store._conn.commit()
+
+    notes = await store.get_notes(sid)
+    assert len(notes) == 2
+    assert notes[0]["body"] == "first"
+    assert notes[1]["body"] == "second"
+
+    # get_primary_note should return the earliest-created row.
+    primary = await store.get_primary_note(sid)
+    assert primary["body"] == "first"
+
+
+# ---------------------------------------------------------------------------
+# discard_session
+# ---------------------------------------------------------------------------
+
+
+async def _count(store, table: str, session_id: str) -> int:
+    cursor = await store._conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE session_id = ?", (session_id,)
+    )
+    row = await cursor.fetchone()
+    return row[0]
+
+
+@pytest.mark.asyncio
+async def test_discard_session_deletes_row_and_cascade(store, sample_address):
+    """discard_session removes the sessions row and every child-table row."""
+    from service.models.session import TargetConfig
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Record a reading -> probe_readings + device_readings
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 72.5}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+
+    # Targets
+    await store.save_targets(
+        sid,
+        sample_address,
+        [TargetConfig(probe_index=1, mode="fixed", target_value=74.0)],
+    )
+
+    # Timer
+    await store.upsert_timer(
+        sid, sample_address, 1, mode="count_down", duration_secs=60
+    )
+
+    # Note
+    await store.upsert_primary_note(sid, "before discard")
+
+    # Sanity — data exists
+    assert await _count(store, "session_devices", sid) == 1
+    assert await _count(store, "probe_readings", sid) == 1
+    assert await _count(store, "device_readings", sid) == 1
+    assert await _count(store, "session_targets", sid) == 1
+    assert await _count(store, "session_timers", sid) == 1
+    assert await _count(store, "session_notes", sid) == 1
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    assert await _count(store, "session_devices", sid) == 0
+    assert await _count(store, "probe_readings", sid) == 0
+    assert await _count(store, "device_readings", sid) == 0
+    assert await _count(store, "session_targets", sid) == 0
+    assert await _count(store, "session_timers", sid) == 0
+    assert await _count(store, "session_notes", sid) == 0
+
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_discard_session_clears_active_state(store, sample_address):
+    """Discarding the current session clears _current_session_id so further
+    timer/other active-only operations on the old id fail (no-op writes)."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.is_session_active() is True
+    assert await store.get_current_session_id() == sid
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    # Active state cleared
+    assert await store.is_session_active() is False
+    assert await store.get_current_session_id() is None
+
+    state = await store.get_session_state()
+    assert state["current_session_id"] is None
+    assert state["current_session_start_ts"] is None
+
+    # Subsequent active-session operation on the old id must not write.
+    with pytest.raises(ValueError, match="active session"):
+        await store.upsert_timer(
+            sid, sample_address, 1, mode="count_down", duration_secs=60
+        )
+    # Confirm no row was created.
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_discard_session_preserves_in_memory_state_on_commit_failure(
+    store, sample_address, monkeypatch
+):
+    """If commit() raises, in-memory session state must NOT be cleared.
+
+    This guards the correctness of discard_session when the database
+    commit fails mid-operation: the transaction is rolled back (so the
+    sessions row still exists on disk), and the in-memory active-session
+    tracking must also remain untouched so the two stay consistent.
+    """
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.get_current_session_id() == sid
+
+    # Make commit fail to simulate a disk/transaction error.
+    original_commit = store._conn.commit
+
+    async def failing_commit():
+        raise RuntimeError("simulated commit failure")
+
+    monkeypatch.setattr(store._conn, "commit", failing_commit)
+
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await store.discard_session(sid)
+
+    # Restore commit so the rest of the test can interact with the DB.
+    monkeypatch.setattr(store._conn, "commit", original_commit)
+
+    # In-memory state must still reflect the active session.
+    assert await store.get_current_session_id() == sid
+    assert await store.is_session_active() is True
+
+    # On-disk row must still exist (ROLLBACK on exception).
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_discard_session_returns_false_for_unknown_id(store):
+    """Unknown session_id returns False without raising."""
+    result = await store.discard_session("deadbeef" * 4)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_discard_session_on_ended_session(store, sample_address):
+    """Discarding an already-ended session still deletes rows and returns True."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+    await store.record_reading(
+        session_id=sid,
+        address=sample_address,
+        seq=1,
+        probes=[{"index": 1, "temperature": 70.0}],
+        battery=80,
+        propane=None,
+        heating=None,
+    )
+    await store.upsert_primary_note(sid, "done")
+    await store.end_session(reason="user")
+
+    # End clears active state already.
+    assert await store.get_current_session_id() is None
+
+    result = await store.discard_session(sid)
+    assert result is True
+
+    assert await _count(store, "session_devices", sid) == 0
+    assert await _count(store, "probe_readings", sid) == 0
+    assert await _count(store, "device_readings", sid) == 0
+    assert await _count(store, "session_notes", sid) == 0
+
+    cursor = await store._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# find_expired_running_countdowns (Task 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_expired_running_countdowns_respects_filters(
+    store, sample_address, monkeypatch,
+):
+    """find_expired_running_countdowns must only return timers that are:
+
+      * mode='count_down'
+      * running (started_at set, paused_at null)
+      * not completed
+      * have a duration_secs set
+      * whose effective elapsed time >= duration_secs
+
+    Each probe exercises a distinct exclusion; probe 6 is the positive case.
+    """
+    from datetime import datetime, timezone, timedelta
+    from service.history import store as store_mod
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Anchor on real now so find_expired_running_countdowns (which uses real
+    # now) computes positive elapsed seconds against t_old.
+    t_now = datetime.now(timezone.utc)
+    t_old = t_now - timedelta(seconds=3600)
+
+    # Drive now_iso_utc() so started_at values are predictable. Order matches
+    # the mutation sequence below — start/pause/complete each call now once.
+    times = iter([
+        t_now, t_now + timedelta(seconds=5),           # probe 1 start, pause
+        t_now, t_now + timedelta(seconds=1),           # probe 2 start, complete
+        t_now,                                         # probe 3 start
+        t_now,                                         # probe 4 start
+        t_now,                                         # probe 5 start
+        t_old,                                         # probe 6 start (long ago)
+    ])
+
+    def fake_now_iso():
+        return next(times).isoformat()
+
+    monkeypatch.setattr(store_mod, "now_iso_utc", fake_now_iso)
+
+    # Probe 1: paused running count_down — excluded (paused_at set)
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 1)
+    await store.pause_timer(sid, sample_address, 1)
+
+    # Probe 2: completed count_down — excluded (completed_at set)
+    await store.upsert_timer(sid, sample_address, 2, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 2)
+    await store.complete_timer(sid, sample_address, 2)
+
+    # Probe 3: count_up timer — excluded (mode != count_down)
+    await store.upsert_timer(sid, sample_address, 3, mode="count_up", duration_secs=None)
+    await store.start_timer(sid, sample_address, 3)
+
+    # Probe 4: running count_down, duration is 10 hours — not yet expired
+    await store.upsert_timer(sid, sample_address, 4, mode="count_down", duration_secs=36000)
+    await store.start_timer(sid, sample_address, 4)
+
+    # Probe 5: count_down with null duration — excluded
+    await store.upsert_timer(sid, sample_address, 5, mode="count_down", duration_secs=None)
+    await store.start_timer(sid, sample_address, 5)
+
+    # Probe 6: running count_down started an hour ago, duration 60s — SHOULD expire
+    await store.upsert_timer(sid, sample_address, 6, mode="count_down", duration_secs=60)
+    await store.start_timer(sid, sample_address, 6)
+
+    # Restore real now so find_expired_running_countdowns sees real elapsed.
+    monkeypatch.setattr(
+        store_mod, "now_iso_utc",
+        lambda: datetime.now(timezone.utc).isoformat(),
+    )
+
+    expired = await store.find_expired_running_countdowns()
+    probe_indices = sorted(r["probe_index"] for r in expired)
+    assert probe_indices == [6], (
+        f"Expected only probe 6 expired, got {probe_indices}"
+    )
+
+    row = expired[0]
+    assert row["mode"] == "count_down"
+    assert row["duration_secs"] == 60
+    assert row["started_at"] is not None
+    assert row["paused_at"] is None
+    assert row["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_find_expired_running_countdowns_empty_when_nothing_matches(
+    store, sample_address,
+):
+    """Base cases: no timers, and a count_down that has been upserted but
+    never started, both yield an empty list."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    assert await store.find_expired_running_countdowns() == []
+
+    await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
+    # Never started — not expired.
+    assert await store.find_expired_running_countdowns() == []
+
+
+# ---------------------------------------------------------------------------
+# target_duration_secs on start_session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_session_persists_target_duration_secs(store, sample_address):
+    """start_session(..., target_duration_secs=3600) must persist the value
+    to sessions.target_duration_secs and expose it via get_session_metadata."""
+    result = await store.start_session(
+        addresses=[sample_address],
+        reason="user",
+        target_duration_secs=3600,
+    )
+    session_id = result["session_id"]
+
+    assert result["target_duration_secs"] == 3600
+    assert result["start_event"]["targetDurationSecs"] == 3600
+
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = ?", (session_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["target_duration_secs"] == 3600
+
+    meta = await store.get_session_metadata(session_id)
+    assert meta["target_duration_secs"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_start_session_without_target_duration_secs_stores_null(
+    store, sample_address,
+):
+    """start_session without target_duration_secs must persist NULL."""
+    result = await store.start_session(
+        addresses=[sample_address], reason="user",
+    )
+    session_id = result["session_id"]
+
+    assert result["target_duration_secs"] is None
+    assert result["start_event"]["targetDurationSecs"] is None
+
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = ?", (session_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["target_duration_secs"] is None
+
+    meta = await store.get_session_metadata(session_id)
+    assert meta["target_duration_secs"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_includes_target_duration_secs(store, sample_address):
+    """list_sessions must surface targetDurationSecs (camelCase) per session."""
+    await store.start_session(
+        addresses=[sample_address], reason="user", target_duration_secs=7200,
+    )
+    sessions = await store.list_sessions(limit=10)
+    assert len(sessions) == 1
+    assert sessions[0]["targetDurationSecs"] == 7200

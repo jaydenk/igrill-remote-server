@@ -158,7 +158,7 @@ async def test_partial_migration_rolls_back(tmp_db):
 
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             row = await cursor.fetchone()
-            assert row[0] == 3
+            assert row[0] == 6
     finally:
         MIGRATIONS.clear()
         MIGRATIONS.update(original)
@@ -177,3 +177,296 @@ async def test_migration_v3_creates_push_tokens(store):
     async with store._conn.execute("PRAGMA table_info(push_tokens)") as cursor:
         columns = {r[1] for r in await cursor.fetchall()}
     assert columns == {"token", "live_activity_token", "created_at", "updated_at"}
+
+
+@pytest.mark.asyncio
+async def test_migration_v4_creates_session_timers(store):
+    """Migration v4 should create the session_timers table with expected columns."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_timers'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "session_timers table should exist after migration"
+
+    # Verify columns
+    async with store._conn.execute("PRAGMA table_info(session_timers)") as cursor:
+        rows = await cursor.fetchall()
+    columns = {r[1] for r in rows}
+    assert columns == {
+        "session_id",
+        "address",
+        "probe_index",
+        "mode",
+        "duration_secs",
+        "started_at",
+        "paused_at",
+        "accumulated_secs",
+        "completed_at",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_timers_session_index_exists(store):
+    """Migration v4 should create idx_session_timers_session for convention parity."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND name='idx_session_timers_session'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, (
+        "idx_session_timers_session index should exist after migration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_timers_composite_primary_key(store):
+    """session_timers should use (session_id, address, probe_index) as composite PK."""
+    # pk column in PRAGMA table_info is column 5 (0-indexed) and is non-zero
+    # for columns participating in the primary key, ordered by their position.
+    async with store._conn.execute("PRAGMA table_info(session_timers)") as cursor:
+        rows = await cursor.fetchall()
+    pk_cols = sorted(
+        ((r[5], r[1]) for r in rows if r[5] > 0),
+        key=lambda item: item[0],
+    )
+    assert [name for _, name in pk_cols] == ["session_id", "address", "probe_index"]
+
+    # Behaviourally: a duplicate (session_id, address, probe_index) must fail.
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('st-sess', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_timers "
+        "(session_id, address, probe_index, mode, accumulated_secs) "
+        "VALUES ('st-sess', 'AA:BB:CC', 0, 'count_up', 0)"
+    )
+    await store._conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        await store._conn.execute(
+            "INSERT INTO session_timers "
+            "(session_id, address, probe_index, mode, accumulated_secs) "
+            "VALUES ('st-sess', 'AA:BB:CC', 0, 'count_down', 0)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_timers_cascade_delete(store):
+    """Deleting a session should cascade-delete its session_timers rows."""
+    # Sanity: foreign keys are enabled by HistoryStore.connect().
+    async with store._conn.execute("PRAGMA foreign_keys") as cursor:
+        row = await cursor.fetchone()
+    assert row[0] == 1, "foreign_keys PRAGMA should be ON"
+
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('cascade-sess', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_timers "
+        "(session_id, address, probe_index, mode, duration_secs, accumulated_secs) "
+        "VALUES ('cascade-sess', 'AA:BB:CC', 0, 'count_down', 600, 0)"
+    )
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = 'cascade-sess'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == 1
+
+    await store._conn.execute("DELETE FROM sessions WHERE id = 'cascade-sess'")
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM session_timers WHERE session_id = 'cascade-sess'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == 0, (
+            "session_timers rows should cascade-delete when parent session is deleted"
+        )
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_creates_session_notes(store):
+    """Migration v5 should create the session_notes table with expected columns."""
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_notes'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "session_notes table should exist after migration"
+
+    async with store._conn.execute("PRAGMA table_info(session_notes)") as cursor:
+        rows = await cursor.fetchall()
+    # row = (cid, name, type, notnull, dflt_value, pk)
+    columns = {r[1]: r for r in rows}
+    assert set(columns.keys()) == {
+        "id",
+        "session_id",
+        "created_at",
+        "updated_at",
+        "body",
+    }
+
+    # id is INTEGER PRIMARY KEY AUTOINCREMENT
+    assert columns["id"][2].upper() == "INTEGER"
+    assert columns["id"][5] == 1, "id should be the primary key"
+
+    # session_id, created_at, updated_at, body are NOT NULL
+    for col_name in ("session_id", "created_at", "updated_at", "body"):
+        assert columns[col_name][3] == 1, f"{col_name} should be NOT NULL"
+
+
+@pytest.mark.asyncio
+async def test_session_notes_autoincrement(store):
+    """session_notes.id should be AUTOINCREMENT (registers in sqlite_sequence)."""
+    # sqlite_sequence only gets populated after an insert; insert a parent session first.
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('ai-sess', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES ('ai-sess', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'hello')"
+    )
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT name FROM sqlite_sequence WHERE name='session_notes'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, (
+        "session_notes.id should be AUTOINCREMENT (in sqlite_sequence)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_notes_index_exists(store):
+    """Migration v5 should create idx_session_notes_session on (session_id, created_at)."""
+    async with store._conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type='index' AND name='idx_session_notes_session'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "idx_session_notes_session index should exist"
+    # Verify it covers the expected columns
+    assert "session_id" in row[1]
+    assert "created_at" in row[1]
+
+
+@pytest.mark.asyncio
+async def test_session_notes_cascade_delete(store):
+    """Deleting a session should cascade-delete its session_notes rows."""
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('notes-cascade', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.execute(
+        "INSERT INTO session_notes (session_id, created_at, updated_at, body) "
+        "VALUES ('notes-cascade', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'x')"
+    )
+    await store._conn.commit()
+
+    await store._conn.execute("DELETE FROM sessions WHERE id = 'notes-cascade'")
+    await store._conn.commit()
+
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM session_notes WHERE session_id = 'notes-cascade'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == 0, (
+            "session_notes rows should cascade-delete when parent session is deleted"
+        )
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_backfills_notes_from_sessions(tmp_db):
+    """Migration v5 should backfill session_notes from non-empty sessions.notes values."""
+    from service.db.migrations import run_migrations
+
+    async with aiosqlite.connect(tmp_db) as conn:
+        conn.row_factory = aiosqlite.Row
+        await init_db(conn)
+
+        # Seed sessions BEFORE v5 runs. We need v2 applied first so sessions.notes exists.
+        # Apply only v2, v3, v4 by temporarily suppressing v5.
+        from service.db import migrations as migrations_mod
+
+        full = dict(migrations_mod.MIGRATIONS)
+        try:
+            # Apply v2..v4 only
+            migrations_mod.MIGRATIONS.clear()
+            migrations_mod.MIGRATIONS.update(
+                {v: full[v] for v in full if v <= 4}
+            )
+            await run_migrations(conn)
+
+            # Seed sessions with varied notes states
+            await conn.execute(
+                "INSERT INTO sessions (id, started_at, start_reason, notes) "
+                "VALUES ('s-with-notes', '2026-02-01T10:00:00Z', 'user', 'meat was good')"
+            )
+            await conn.execute(
+                "INSERT INTO sessions (id, started_at, start_reason, notes) "
+                "VALUES ('s-null-notes', '2026-02-02T10:00:00Z', 'user', NULL)"
+            )
+            await conn.execute(
+                "INSERT INTO sessions (id, started_at, start_reason, notes) "
+                "VALUES ('s-empty-notes', '2026-02-03T10:00:00Z', 'user', '')"
+            )
+            await conn.commit()
+
+            # Now apply v5
+            migrations_mod.MIGRATIONS.clear()
+            migrations_mod.MIGRATIONS.update(full)
+            await run_migrations(conn)
+
+            # Only the session with real notes should produce a row
+            cursor = await conn.execute(
+                "SELECT session_id, created_at, updated_at, body "
+                "FROM session_notes ORDER BY session_id"
+            )
+            rows = await cursor.fetchall()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["session_id"] == "s-with-notes"
+            assert row["body"] == "meat was good"
+            assert row["created_at"] == "2026-02-01T10:00:00Z"
+            assert row["updated_at"] == "2026-02-01T10:00:00Z"
+        finally:
+            migrations_mod.MIGRATIONS.clear()
+            migrations_mod.MIGRATIONS.update(full)
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_preserves_sessions_notes_column(store):
+    """v5 must NOT drop sessions.notes — it is kept for one release cycle."""
+    async with store._conn.execute("PRAGMA table_info(sessions)") as cursor:
+        cols = {r[1] for r in await cursor.fetchall()}
+    assert "notes" in cols, "sessions.notes column should still exist after v5"
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_adds_target_duration_secs(store):
+    """Migration v6 should add a nullable INTEGER target_duration_secs column to sessions."""
+    async with store._conn.execute("PRAGMA table_info(sessions)") as cursor:
+        rows = await cursor.fetchall()
+    # row = (cid, name, type, notnull, dflt_value, pk)
+    columns = {r[1]: r for r in rows}
+    assert "target_duration_secs" in columns, (
+        "sessions.target_duration_secs column should exist after migration v6"
+    )
+    col = columns["target_duration_secs"]
+    assert col[2].upper() == "INTEGER", (
+        f"target_duration_secs should be INTEGER, got {col[2]!r}"
+    )
+    assert col[3] == 0, "target_duration_secs should be nullable (notnull=0)"
+
+    # Behavioural check: NULL inserts must be permitted.
+    await store._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) "
+        "VALUES ('td-null', '2026-01-01T00:00:00Z', 'user')"
+    )
+    await store._conn.commit()
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = 'td-null'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row[0] is None

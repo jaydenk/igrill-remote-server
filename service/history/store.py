@@ -129,13 +129,21 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     async def start_session(
-        self, addresses: list[str], reason: str, name: Optional[str] = None
+        self,
+        addresses: list[str],
+        reason: str,
+        name: Optional[str] = None,
+        target_duration_secs: Optional[int] = None,
     ) -> dict:
         """Create a new session.
 
         If a session is already active, ends it first.  Creates
         ``session_devices`` entries for each address and ensures each
         address is present in the ``devices`` table.
+
+        ``target_duration_secs`` is an optional user-specified cook
+        duration target (in seconds) which is persisted to the
+        ``sessions.target_duration_secs`` column.  ``None`` stores NULL.
 
         Returns a dict with ``session_id``, ``session_start_ts``,
         ``start_event``, and ``end_event`` (the latter from ending the
@@ -150,8 +158,10 @@ class HistoryStore:
             session_id = uuid.uuid4().hex
 
             await self._conn.execute(
-                "INSERT INTO sessions (id, started_at, start_reason, name) VALUES (?, ?, ?, ?)",
-                (session_id, now_ts, reason, name),
+                "INSERT INTO sessions "
+                "(id, started_at, start_reason, name, target_duration_secs) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, now_ts, reason, name, target_duration_secs),
             )
 
             for addr in addresses:
@@ -173,11 +183,13 @@ class HistoryStore:
                 "reason": reason,
                 "name": name,
                 "devices": addresses,
+                "targetDurationSecs": target_duration_secs,
             }
 
             return {
                 "session_id": session_id,
                 "session_start_ts": now_ts,
+                "target_duration_secs": target_duration_secs,
                 "start_event": start_event,
                 "end_event": end_event,
             }
@@ -236,6 +248,79 @@ class HistoryStore:
             result["durationSeconds"] = duration_seconds
         return result
 
+    async def discard_session(self, session_id: str) -> bool:
+        """Hard-delete a session and every associated child row.
+
+        If ``session_id`` is the currently-active session, ``_current_session_id``
+        (and related transient fields) are cleared first so no further
+        readings/targets/timers are recorded against it.
+
+        Child tables without ``ON DELETE CASCADE`` on their FK
+        (``session_devices``, ``session_targets``, ``probe_readings``,
+        ``device_readings``) are deleted explicitly in the same
+        transaction.  ``session_timers`` and ``session_notes`` cascade
+        automatically from the ``sessions`` delete, but we still issue
+        explicit deletes for symmetry and to keep behaviour robust if the
+        cascade constraint is ever dropped.
+
+        Returns True if the ``sessions`` row was deleted, False if
+        ``session_id`` did not exist.
+        """
+        async with self._lock:
+            # Capture which in-memory fields would need clearing so the
+            # clears only run after a successful commit.  If the commit
+            # fails we leave in-memory state untouched to stay consistent
+            # with on-disk state.
+            was_current = self._current_session_id == session_id
+            was_last = self._last_session_id == session_id
+
+            try:
+                await self._conn.execute("BEGIN")
+                # Explicit deletes for child tables without ON DELETE CASCADE.
+                await self._conn.execute(
+                    "DELETE FROM probe_readings WHERE session_id = ?",
+                    (session_id,),
+                )
+                await self._conn.execute(
+                    "DELETE FROM device_readings WHERE session_id = ?",
+                    (session_id,),
+                )
+                await self._conn.execute(
+                    "DELETE FROM session_targets WHERE session_id = ?",
+                    (session_id,),
+                )
+                await self._conn.execute(
+                    "DELETE FROM session_devices WHERE session_id = ?",
+                    (session_id,),
+                )
+                # session_timers and session_notes cascade via FK, but
+                # delete explicitly for clarity / defence in depth.
+                await self._conn.execute(
+                    "DELETE FROM session_timers WHERE session_id = ?",
+                    (session_id,),
+                )
+                await self._conn.execute(
+                    "DELETE FROM session_notes WHERE session_id = ?",
+                    (session_id,),
+                )
+                cursor = await self._conn.execute(
+                    "DELETE FROM sessions WHERE id = ?", (session_id,)
+                )
+                deleted = cursor.rowcount > 0
+                await self._conn.commit()
+
+                # Commit succeeded: safe to clear in-memory state.
+                if was_current:
+                    self._current_session_id = None
+                    self._current_session_start_ts = None
+                if was_last:
+                    self._last_session_id = None
+            except Exception:
+                await self._conn.execute("ROLLBACK")
+                raise
+
+            return deleted
+
     async def get_session_state(self) -> dict:
         """Return the current session state."""
         async with self._lock:
@@ -293,15 +378,22 @@ class HistoryStore:
             return {"name": row["name"], "notes": row["notes"]}
 
     async def get_session_metadata(self, session_id: str) -> Optional[dict]:
-        """Return name and notes for a session, or None if not found."""
+        """Return name, notes, and target_duration_secs for a session,
+        or None if not found."""
         async with self._lock:
             cursor = await self._conn.execute(
-                "SELECT name, notes FROM sessions WHERE id = ?", (session_id,)
+                "SELECT name, notes, target_duration_secs FROM sessions "
+                "WHERE id = ?",
+                (session_id,),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
-            return {"name": row["name"], "notes": row["notes"]}
+            return {
+                "name": row["name"],
+                "notes": row["notes"],
+                "target_duration_secs": row["target_duration_secs"],
+            }
 
     # ------------------------------------------------------------------
     # Multi-device management within sessions
@@ -598,7 +690,7 @@ class HistoryStore:
             # Step 1: fetch sessions with reading counts
             cursor = await self._conn.execute(
                 "SELECT s.id, s.started_at, s.ended_at, s.start_reason, s.end_reason, "
-                "s.name, s.notes, "
+                "s.name, s.notes, s.target_duration_secs, "
                 "(SELECT COUNT(*) FROM probe_readings pr WHERE pr.session_id = s.id) AS reading_count "
                 "FROM sessions s "
                 "ORDER BY s.started_at DESC "
@@ -643,6 +735,7 @@ class HistoryStore:
                         "endReason": row["end_reason"],
                         "name": row["name"],
                         "notes": row["notes"],
+                        "targetDurationSecs": row["target_duration_secs"],
                         "readingCount": row["reading_count"],
                         "devices": devices_by_session.get(row["id"], []),
                     }
@@ -732,6 +825,471 @@ class HistoryStore:
                     ),
                 )
             await self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Session timers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _timer_row_to_dict(row) -> dict:
+        """Convert a ``session_timers`` row to a plain dict."""
+        return {
+            "session_id": row["session_id"],
+            "address": row["address"],
+            "probe_index": row["probe_index"],
+            "mode": row["mode"],
+            "duration_secs": row["duration_secs"],
+            "started_at": row["started_at"],
+            "paused_at": row["paused_at"],
+            "accumulated_secs": row["accumulated_secs"],
+            "completed_at": row["completed_at"],
+        }
+
+    async def _fetch_timer_locked(
+        self, session_id: str, address: str, probe_index: int
+    ) -> Optional[dict]:
+        """Fetch a single timer row as a dict (must hold ``_lock``)."""
+        cursor = await self._conn.execute(
+            "SELECT session_id, address, probe_index, mode, duration_secs, "
+            "started_at, paused_at, accumulated_secs, completed_at "
+            "FROM session_timers "
+            "WHERE session_id = ? AND address = ? AND probe_index = ?",
+            (session_id, address, probe_index),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._timer_row_to_dict(row)
+
+    def _require_active_session_locked(self, session_id: str) -> None:
+        """Raise if the given session is not the currently-active session."""
+        if self._current_session_id != session_id:
+            raise ValueError("Timer operations require active session")
+
+    async def upsert_timer(
+        self,
+        session_id: str,
+        address: str,
+        probe_index: int,
+        mode: str,
+        duration_secs: Optional[int] = None,
+    ) -> dict:
+        """Create or reset a paused-initial timer row.
+
+        If a row already exists for (session_id, address, probe_index), it
+        is replaced — mode and duration_secs are updated and all other
+        fields reset to their initial (paused, un-started) state.
+        """
+        if mode not in ("count_up", "count_down"):
+            raise ValueError(
+                f"mode must be 'count_up' or 'count_down', got {mode!r}"
+            )
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            # Explicit FK validation for a clearer error than a raw IntegrityError.
+            cursor = await self._conn.execute(
+                "SELECT id FROM sessions WHERE id = ?", (session_id,)
+            )
+            if await cursor.fetchone() is None:
+                raise ValueError(f"Session {session_id} does not exist")
+
+            await self._conn.execute(
+                "INSERT INTO session_timers "
+                "(session_id, address, probe_index, mode, duration_secs, "
+                "started_at, paused_at, accumulated_secs, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, NULL) "
+                "ON CONFLICT(session_id, address, probe_index) DO UPDATE SET "
+                "mode = excluded.mode, "
+                "duration_secs = excluded.duration_secs, "
+                "started_at = NULL, "
+                "paused_at = NULL, "
+                "accumulated_secs = 0, "
+                "completed_at = NULL",
+                (session_id, address, probe_index, mode, duration_secs),
+            )
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None  # just inserted
+            return row
+
+    async def start_timer(
+        self, session_id: str, address: str, probe_index: int
+    ) -> dict:
+        """Start (or resume an un-started) timer.
+
+        Idempotent: if the timer is already running, returns the current
+        row unchanged without resetting ``started_at``.
+
+        If the timer is currently paused, this acts as a resume (sets
+        ``started_at=now``, clears ``paused_at``, preserves
+        ``accumulated_secs``).
+        """
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            if row is None:
+                raise ValueError(
+                    f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            # Already running — idempotent no-op.
+            if row["started_at"] is not None and row["paused_at"] is None:
+                return row
+
+            now_ts = now_iso_utc()
+            await self._conn.execute(
+                "UPDATE session_timers "
+                "SET started_at = ?, paused_at = NULL "
+                "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                (now_ts, session_id, address, probe_index),
+            )
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None
+            return row
+
+    async def pause_timer(
+        self, session_id: str, address: str, probe_index: int
+    ) -> dict:
+        """Pause a running timer, accumulating elapsed seconds.
+
+        No-op if the timer is not running (either never started or already
+        paused): returns the current row unchanged.
+        """
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            if row is None:
+                raise ValueError(
+                    f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            if row["started_at"] is None or row["paused_at"] is not None:
+                return row
+
+            now_ts = now_iso_utc()
+            now_dt = parse_iso(now_ts)
+            started_dt = parse_iso(row["started_at"])
+            elapsed = 0
+            if now_dt is not None and started_dt is not None:
+                elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+            new_accum = (row["accumulated_secs"] or 0) + elapsed
+
+            await self._conn.execute(
+                "UPDATE session_timers "
+                "SET paused_at = ?, started_at = NULL, accumulated_secs = ? "
+                "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                (now_ts, new_accum, session_id, address, probe_index),
+            )
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None
+            return row
+
+    async def resume_timer(
+        self, session_id: str, address: str, probe_index: int
+    ) -> dict:
+        """Resume a paused timer.
+
+        No-op if the timer is not paused: returns the current row
+        unchanged.
+        """
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            if row is None:
+                raise ValueError(
+                    f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            if row["paused_at"] is None:
+                return row
+
+            now_ts = now_iso_utc()
+            await self._conn.execute(
+                "UPDATE session_timers "
+                "SET started_at = ?, paused_at = NULL "
+                "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                (now_ts, session_id, address, probe_index),
+            )
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None
+            return row
+
+    async def reset_timer(
+        self, session_id: str, address: str, probe_index: int
+    ) -> dict:
+        """Reset a timer to the initial paused state.
+
+        Preserves ``mode`` and ``duration_secs``; clears ``started_at``,
+        ``paused_at``, ``completed_at`` and zeros ``accumulated_secs``.
+        """
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            if row is None:
+                raise ValueError(
+                    f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            await self._conn.execute(
+                "UPDATE session_timers "
+                "SET started_at = NULL, paused_at = NULL, "
+                "accumulated_secs = 0, completed_at = NULL "
+                "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                (session_id, address, probe_index),
+            )
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None
+            return row
+
+    async def complete_timer(
+        self, session_id: str, address: str, probe_index: int
+    ) -> dict:
+        """Mark a timer complete.
+
+        Behaviour depends on the timer's current runtime state:
+
+        * Running (``started_at`` set, ``paused_at`` null): elapsed time
+          is accumulated, ``paused_at`` is set to now, ``started_at`` is
+          cleared, and ``completed_at`` is set (if not already set).
+        * Already paused (``paused_at`` set): only ``completed_at`` is
+          set (if not already set). ``paused_at``, ``started_at`` and
+          ``accumulated_secs`` are left untouched — the timer was not
+          running so there is no elapsed to accumulate.
+        * Never started: ``completed_at`` is set (if not already set)
+          and ``paused_at`` is set to now so the row has a well-defined
+          terminal state.
+        """
+        async with self._lock:
+            self._require_active_session_locked(session_id)
+
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            if row is None:
+                raise ValueError(
+                    f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            now_ts = now_iso_utc()
+            completed_at = row["completed_at"] if row["completed_at"] else now_ts
+
+            if row["started_at"] is not None and row["paused_at"] is None:
+                # Running — accumulate elapsed and pause.
+                now_dt = parse_iso(now_ts)
+                started_dt = parse_iso(row["started_at"])
+                elapsed = 0
+                if now_dt is not None and started_dt is not None:
+                    elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+                new_accum = (row["accumulated_secs"] or 0) + elapsed
+
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ?, paused_at = ?, started_at = NULL, "
+                    "accumulated_secs = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (
+                        completed_at,
+                        now_ts,
+                        new_accum,
+                        session_id,
+                        address,
+                        probe_index,
+                    ),
+                )
+            elif row["paused_at"] is not None:
+                # Already paused — only set completed_at.
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (completed_at, session_id, address, probe_index),
+                )
+            else:
+                # Never started — set completed_at and give paused_at a
+                # well-defined terminal value.
+                await self._conn.execute(
+                    "UPDATE session_timers "
+                    "SET completed_at = ?, paused_at = ? "
+                    "WHERE session_id = ? AND address = ? AND probe_index = ?",
+                    (completed_at, now_ts, session_id, address, probe_index),
+                )
+
+            await self._conn.commit()
+            row = await self._fetch_timer_locked(session_id, address, probe_index)
+            assert row is not None
+            return row
+
+    async def get_timers(self, session_id: str) -> list[dict]:
+        """Return all timer rows for a session (possibly empty).
+
+        Works for any session, not just the active one — needed for
+        historical reads.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT session_id, address, probe_index, mode, duration_secs, "
+                "started_at, paused_at, accumulated_secs, completed_at "
+                "FROM session_timers "
+                "WHERE session_id = ? "
+                "ORDER BY address ASC, probe_index ASC",
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+            return [self._timer_row_to_dict(r) for r in rows]
+
+    async def find_expired_running_countdowns(self) -> list[dict]:
+        """Return all running count_down timer rows whose effective elapsed
+        time has reached or exceeded ``duration_secs``.
+
+        A row qualifies when:
+
+        * ``mode = 'count_down'``
+        * ``started_at`` is set, ``paused_at`` is null, ``completed_at`` is null
+        * ``duration_secs`` is not null
+        * ``accumulated_secs + (now - started_at) >= duration_secs``
+
+        The SQL-side filter narrows to running, un-completed countdowns with
+        a duration; the final arithmetic comparison is done in Python for
+        clarity (no SQL julianday tricks).
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT session_id, address, probe_index, mode, duration_secs, "
+                "started_at, paused_at, accumulated_secs, completed_at "
+                "FROM session_timers "
+                "WHERE mode = 'count_down' "
+                "AND started_at IS NOT NULL "
+                "AND paused_at IS NULL "
+                "AND completed_at IS NULL "
+                "AND duration_secs IS NOT NULL"
+            )
+            rows = await cursor.fetchall()
+
+            now_dt = parse_iso(now_iso_utc())
+            if now_dt is None:
+                return []
+
+            expired: list[dict] = []
+            for row in rows:
+                started_dt = parse_iso(row["started_at"])
+                if started_dt is None:
+                    continue
+                elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+                effective = (row["accumulated_secs"] or 0) + elapsed
+                if effective >= row["duration_secs"]:
+                    expired.append(self._timer_row_to_dict(row))
+            return expired
+
+    # ------------------------------------------------------------------
+    # Session notes CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _note_row_to_dict(row) -> dict:
+        """Convert a ``session_notes`` row to a plain dict."""
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "body": row["body"],
+        }
+
+    async def _fetch_primary_note_locked(self, session_id: str) -> Optional[dict]:
+        """Fetch the earliest-created note row as a dict (must hold ``_lock``)."""
+        cursor = await self._conn.execute(
+            "SELECT id, session_id, created_at, updated_at, body "
+            "FROM session_notes "
+            "WHERE session_id = ? "
+            "ORDER BY created_at ASC, id ASC "
+            "LIMIT 1",
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._note_row_to_dict(row)
+
+    async def get_primary_note(self, session_id: str) -> Optional[dict]:
+        """Return the earliest-created note row for a session, or None.
+
+        The "primary" note is the first one created for a session (lowest
+        ``created_at``, breaking ties by lowest ``id``).  Notes are
+        readable on any session — active or ended.
+        """
+        async with self._lock:
+            return await self._fetch_primary_note_locked(session_id)
+
+    async def upsert_primary_note(self, session_id: str, body: str) -> dict:
+        """Create or update the primary note for a session.
+
+        If no notes row exists, INSERTs one with ``created_at = updated_at = now``.
+        Otherwise UPDATEs the earliest-created row, setting ``body`` and
+        ``updated_at = now`` while preserving ``created_at``.
+
+        Notes remain editable after a session ends (unlike timers), so no
+        active-session guard is applied here.  The legacy ``sessions.notes``
+        column is dual-written to ``body`` for one release cycle of
+        backwards compatibility — if no matching ``sessions`` row exists
+        the FK violation surfaces.
+        """
+        async with self._lock:
+            now_ts = now_iso_utc()
+            existing = await self._fetch_primary_note_locked(session_id)
+
+            if existing is None:
+                await self._conn.execute(
+                    "INSERT INTO session_notes "
+                    "(session_id, created_at, updated_at, body) "
+                    "VALUES (?, ?, ?, ?)",
+                    (session_id, now_ts, now_ts, body),
+                )
+            else:
+                await self._conn.execute(
+                    "UPDATE session_notes "
+                    "SET body = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (body, now_ts, existing["id"]),
+                )
+
+            # Dual-write to the legacy sessions.notes column.
+            await self._conn.execute(
+                "UPDATE sessions SET notes = ? WHERE id = ?",
+                (body, session_id),
+            )
+
+            await self._conn.commit()
+            row = await self._fetch_primary_note_locked(session_id)
+            assert row is not None  # just inserted or updated
+            return row
+
+    async def get_notes(self, session_id: str) -> list[dict]:
+        """Return all notes rows for a session, ordered by created_at ASC, id ASC.
+
+        Empty list if none.  Works for any session, active or ended.
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT id, session_id, created_at, updated_at, body "
+                "FROM session_notes "
+                "WHERE session_id = ? "
+                "ORDER BY created_at ASC, id ASC",
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+            return [self._note_row_to_dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Query helpers
