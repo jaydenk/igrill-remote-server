@@ -913,3 +913,113 @@ async def test_countdown_completer_auto_completes_and_broadcasts(client):
             await broadcast_task
         except _asyncio.CancelledError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# session_start_request — target_duration_secs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_session_start_with_target_duration_secs(client):
+    """session_start_request accepts targetDurationSecs; the ack,
+    status_request response, and GET /api/sessions/{id} all expose it."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "name": "Long cook",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targetDurationSecs": 3600,
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        assert msg["payload"]["targetDurationSecs"] == 3600
+        session_id = msg["payload"]["sessionId"]
+
+        # status_request should echo it on the active session.
+        await ws.send_json({
+            "v": 2, "type": "status_request", "requestId": "r2", "payload": {},
+        })
+        status = await ws.receive_json()
+        while status.get("type") != "status":
+            status = await ws.receive_json()
+        assert status["payload"]["currentSessionId"] == session_id
+        assert status["payload"]["currentTargetDurationSecs"] == 3600
+
+    # REST detail endpoint exposes targetDurationSecs.
+    resp = await client.get(f"/api/sessions/{session_id}")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["targetDurationSecs"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_ws_session_start_without_target_duration_secs_is_null(client):
+    """Omitting targetDurationSecs must persist NULL; the ack, status,
+    and REST detail all expose the field as null (not missing)."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        assert "targetDurationSecs" in msg["payload"]
+        assert msg["payload"]["targetDurationSecs"] is None
+        session_id = msg["payload"]["sessionId"]
+
+        await ws.send_json({
+            "v": 2, "type": "status_request", "requestId": "r2", "payload": {},
+        })
+        status = await ws.receive_json()
+        while status.get("type") != "status":
+            status = await ws.receive_json()
+        assert "currentTargetDurationSecs" in status["payload"]
+        assert status["payload"]["currentTargetDurationSecs"] is None
+
+    resp = await client.get(f"/api/sessions/{session_id}")
+    assert resp.status == 200
+    body = await resp.json()
+    assert "targetDurationSecs" in body
+    assert body["targetDurationSecs"] is None
+
+
+@pytest.mark.asyncio
+async def test_ws_session_start_rejects_non_integer_target_duration_secs(client):
+    """targetDurationSecs must be an integer; strings/floats/<=0 are rejected
+    with an invalid_payload error and no session is created."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+                "targetDurationSecs": "not-a-number",
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_start_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_payload"
+
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r2",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+                "targetDurationSecs": 0,
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_start_ack"):
+            msg = await ws.receive_json()
+        assert msg.get("type") == "error"
+        assert msg["payload"]["code"] == "invalid_payload"

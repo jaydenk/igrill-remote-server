@@ -1280,3 +1280,66 @@ async def test_find_expired_running_countdowns_empty_when_nothing_matches(
     await store.upsert_timer(sid, sample_address, 1, mode="count_down", duration_secs=60)
     # Never started — not expired.
     assert await store.find_expired_running_countdowns() == []
+
+
+# ---------------------------------------------------------------------------
+# target_duration_secs on start_session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_session_persists_target_duration_secs(store, sample_address):
+    """start_session(..., target_duration_secs=3600) must persist the value
+    to sessions.target_duration_secs and expose it via get_session_metadata."""
+    result = await store.start_session(
+        addresses=[sample_address],
+        reason="user",
+        target_duration_secs=3600,
+    )
+    session_id = result["session_id"]
+
+    assert result["target_duration_secs"] == 3600
+    assert result["start_event"]["targetDurationSecs"] == 3600
+
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = ?", (session_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["target_duration_secs"] == 3600
+
+    meta = await store.get_session_metadata(session_id)
+    assert meta["target_duration_secs"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_start_session_without_target_duration_secs_stores_null(
+    store, sample_address,
+):
+    """start_session without target_duration_secs must persist NULL."""
+    result = await store.start_session(
+        addresses=[sample_address], reason="user",
+    )
+    session_id = result["session_id"]
+
+    assert result["target_duration_secs"] is None
+    assert result["start_event"]["targetDurationSecs"] is None
+
+    async with store._conn.execute(
+        "SELECT target_duration_secs FROM sessions WHERE id = ?", (session_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["target_duration_secs"] is None
+
+    meta = await store.get_session_metadata(session_id)
+    assert meta["target_duration_secs"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_includes_target_duration_secs(store, sample_address):
+    """list_sessions must surface targetDurationSecs (camelCase) per session."""
+    await store.start_session(
+        addresses=[sample_address], reason="user", target_duration_secs=7200,
+    )
+    sessions = await store.list_sessions(limit=10)
+    assert len(sessions) == 1
+    assert sessions[0]["targetDurationSecs"] == 7200

@@ -279,6 +279,9 @@ async def _handle_status(ctx: _MessageContext) -> None:
     if current_sid is not None:
         meta = await ctx.history.get_session_metadata(current_sid)
         status_payload["currentSessionName"] = meta["name"] if meta else None
+        status_payload["currentTargetDurationSecs"] = (
+            meta["target_duration_secs"] if meta else None
+        )
     LOG.info("WS send status to %s: deviceState=%s hasData=%s sessionId=%s",
              ctx.peer, device_state, has_data, session_state.get("current_session_id"))
     await send_envelope(ctx.ws, "status", status_payload, request_id=ctx.request_id)
@@ -433,8 +436,32 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
     name = ctx.payload.get("name")
     if name is not None:
         name = str(name)[:200]  # Truncate to prevent abuse
+
+    raw_target_duration = ctx.payload.get("targetDurationSecs")
+    target_duration_secs: Optional[int] = None
+    if raw_target_duration is not None:
+        try:
+            target_duration_secs = int(raw_target_duration)
+        except (TypeError, ValueError):
+            await send_error(
+                ctx.ws, "invalid_payload",
+                "targetDurationSecs must be an integer.",
+                request_id=ctx.request_id,
+            )
+            return
+        if target_duration_secs <= 0:
+            await send_error(
+                ctx.ws, "invalid_payload",
+                "targetDurationSecs must be a positive integer.",
+                request_id=ctx.request_id,
+            )
+            return
+
     session_info = await ctx.history.start_session(
-        addresses=device_addresses, reason="user", name=name
+        addresses=device_addresses,
+        reason="user",
+        name=name,
+        target_duration_secs=target_duration_secs,
     )
 
     if session_info.get("end_event"):
@@ -460,6 +487,7 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         "sessionId": new_session_id,
         "sessionStartTs": session_info["session_start_ts"],
         "name": name,
+        "targetDurationSecs": target_duration_secs,
         "devices": device_addresses,
         "targets": [t.to_dict() for t in targets],
     }

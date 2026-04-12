@@ -75,10 +75,12 @@ async def session_detail_handler(request: web.Request) -> web.Response:
     meta = await history.get_session_metadata(session_id)
     name = meta["name"] if meta else None
     notes = meta["notes"] if meta else None
+    target_duration_secs = meta["target_duration_secs"] if meta else None
     return web.json_response({
         "sessionId": session_id,
         "name": name,
         "notes": notes,
+        "targetDurationSecs": target_duration_secs,
         "devices": devices,
         "targets": [t.to_dict() for t in targets],
         "readings": readings,

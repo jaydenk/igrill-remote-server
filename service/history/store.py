@@ -129,13 +129,21 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     async def start_session(
-        self, addresses: list[str], reason: str, name: Optional[str] = None
+        self,
+        addresses: list[str],
+        reason: str,
+        name: Optional[str] = None,
+        target_duration_secs: Optional[int] = None,
     ) -> dict:
         """Create a new session.
 
         If a session is already active, ends it first.  Creates
         ``session_devices`` entries for each address and ensures each
         address is present in the ``devices`` table.
+
+        ``target_duration_secs`` is an optional user-specified cook
+        duration target (in seconds) which is persisted to the
+        ``sessions.target_duration_secs`` column.  ``None`` stores NULL.
 
         Returns a dict with ``session_id``, ``session_start_ts``,
         ``start_event``, and ``end_event`` (the latter from ending the
@@ -150,8 +158,10 @@ class HistoryStore:
             session_id = uuid.uuid4().hex
 
             await self._conn.execute(
-                "INSERT INTO sessions (id, started_at, start_reason, name) VALUES (?, ?, ?, ?)",
-                (session_id, now_ts, reason, name),
+                "INSERT INTO sessions "
+                "(id, started_at, start_reason, name, target_duration_secs) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, now_ts, reason, name, target_duration_secs),
             )
 
             for addr in addresses:
@@ -173,11 +183,13 @@ class HistoryStore:
                 "reason": reason,
                 "name": name,
                 "devices": addresses,
+                "targetDurationSecs": target_duration_secs,
             }
 
             return {
                 "session_id": session_id,
                 "session_start_ts": now_ts,
+                "target_duration_secs": target_duration_secs,
                 "start_event": start_event,
                 "end_event": end_event,
             }
@@ -366,15 +378,22 @@ class HistoryStore:
             return {"name": row["name"], "notes": row["notes"]}
 
     async def get_session_metadata(self, session_id: str) -> Optional[dict]:
-        """Return name and notes for a session, or None if not found."""
+        """Return name, notes, and target_duration_secs for a session,
+        or None if not found."""
         async with self._lock:
             cursor = await self._conn.execute(
-                "SELECT name, notes FROM sessions WHERE id = ?", (session_id,)
+                "SELECT name, notes, target_duration_secs FROM sessions "
+                "WHERE id = ?",
+                (session_id,),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
-            return {"name": row["name"], "notes": row["notes"]}
+            return {
+                "name": row["name"],
+                "notes": row["notes"],
+                "target_duration_secs": row["target_duration_secs"],
+            }
 
     # ------------------------------------------------------------------
     # Multi-device management within sessions
@@ -671,7 +690,7 @@ class HistoryStore:
             # Step 1: fetch sessions with reading counts
             cursor = await self._conn.execute(
                 "SELECT s.id, s.started_at, s.ended_at, s.start_reason, s.end_reason, "
-                "s.name, s.notes, "
+                "s.name, s.notes, s.target_duration_secs, "
                 "(SELECT COUNT(*) FROM probe_readings pr WHERE pr.session_id = s.id) AS reading_count "
                 "FROM sessions s "
                 "ORDER BY s.started_at DESC "
@@ -716,6 +735,7 @@ class HistoryStore:
                         "endReason": row["end_reason"],
                         "name": row["name"],
                         "notes": row["notes"],
+                        "targetDurationSecs": row["target_duration_secs"],
                         "readingCount": row["reading_count"],
                         "devices": devices_by_session.get(row["id"], []),
                     }
