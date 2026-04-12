@@ -23,10 +23,10 @@ SIM_MODEL_NAME = "iGrill V2"
 
 # (label, mode, target_value, range_low, range_high, k, noise, start_delay_ticks)
 _PROBE_CONFIGS = [
-    ("Brisket", "fixed", 90.0, None, None, 0.015, 1.5, 30),
-    ("Ribs", "fixed", 80.0, None, None, 0.020, 1.5, 30),
     ("BBQ Temp", "range", None, 110.0, 130.0, None, 5.0, 0),
-    ("Pork Belly", "fixed", 75.0, None, None, 0.010, 1.0, 25),
+    ("Brisket", "fixed", 90.0, None, None, 0.008, 1.5, 120),
+    ("Ribs", "fixed", 80.0, None, None, 0.009, 1.5, 120),
+    ("Pork Belly", "fixed", 75.0, None, None, 0.010, 1.0, 120),
 ]
 
 
