@@ -1,0 +1,24 @@
+{
+  "planPath": "docs/plans/2026-04-10-server-review-fixes-plan.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Remove legacy schema code and dead imports", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Make migrations atomic", "status": "pending"},
+    {"id": 3, "subject": "Task 3: INSERT OR REPLACE to INSERT OR IGNORE", "status": "pending"},
+    {"id": 4, "subject": "Task 4: Add transaction safety to downsampler", "status": "pending"},
+    {"id": 5, "subject": "Task 5: Align TargetConfig defaults", "status": "pending"},
+    {"id": 6, "subject": "Task 6: Merge get_session_name/notes into get_session_metadata", "status": "pending"},
+    {"id": 7, "subject": "Task 7: Increment _seq only after successful write", "status": "pending"},
+    {"id": 8, "subject": "Task 8: Fix broken export handler", "status": "pending", "blockedBy": [1, 2, 3, 4, 5, 6, 7]},
+    {"id": 9, "subject": "Task 9: Simplify WebSocket _sender", "status": "pending", "blockedBy": [1, 2, 3, 4, 5, 6, 7]},
+    {"id": 10, "subject": "Task 10: Add offset to WS _handle_sessions", "status": "pending", "blockedBy": [1, 2, 3, 4, 5, 6, 7]},
+    {"id": 11, "subject": "Task 11: Log evicted critical events", "status": "pending", "blockedBy": [1, 2, 3, 4, 5, 6, 7]},
+    {"id": 12, "subject": "Task 12: Remove duplicate session fields from reading payload", "status": "pending", "blockedBy": [1, 2, 3, 4, 5, 6, 7]},
+    {"id": 13, "subject": "Task 13: Remove dead BLE code and unused imports", "status": "pending", "blockedBy": [8, 9, 10, 11, 12]},
+    {"id": 14, "subject": "Task 14: Make ws_seq monotonic across respawns", "status": "pending", "blockedBy": [8, 9, 10, 11, 12]},
+    {"id": 15, "subject": "Task 15: Log device_left_session failure at WARNING", "status": "pending", "blockedBy": [8, 9, 10, 11, 12]},
+    {"id": 16, "subject": "Task 16: Replace asyncio.ensure_future with create_task", "status": "pending", "blockedBy": [8, 9, 10, 11, 12]},
+    {"id": 17, "subject": "Task 17: Add remaining test coverage", "status": "pending", "blockedBy": [13, 14, 15, 16]},
+    {"id": 18, "subject": "Task 18: Update README", "status": "pending", "blockedBy": [17]}
+  ],
+  "lastUpdated": "2026-04-10T12:00:00Z"
+}
