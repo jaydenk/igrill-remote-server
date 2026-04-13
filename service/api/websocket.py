@@ -747,14 +747,20 @@ async def _handle_target_update(ctx: _MessageContext) -> None:
     await ctx.history.update_targets(current_sid, target_address, targets)
     ctx.evaluator.set_targets(current_sid, targets)
 
+    payload = {
+        "ok": True,
+        "sessionId": current_sid,
+        "targets": [t.to_dict() for t in targets],
+    }
+
+    # Broadcast to all peers so other clients (iOS, other web tabs) pick
+    # up the new targets without waiting for a status snapshot. The
+    # requesting client also gets the ack via send_envelope below; both
+    # carry the same payload shape and iOS treats them equivalently.
+    await ctx.store.publish_event(make_envelope("target_update", payload))
+
     await send_envelope(
-        ctx.ws, "target_update_ack",
-        {
-            "ok": True,
-            "sessionId": current_sid,
-            "targets": [t.to_dict() for t in targets],
-        },
-        request_id=ctx.request_id,
+        ctx.ws, "target_update_ack", payload, request_id=ctx.request_id,
     )
 
 
@@ -836,10 +842,18 @@ async def _handle_session_update(ctx: _MessageContext) -> None:
         await send_error(ctx.ws, "session_not_found", f"Session {session_id} does not exist.", request_id=ctx.request_id)
         return
 
-    await send_envelope(ctx.ws, "session_update_ack", {
+    payload = {
         "ok": True, "sessionId": session_id,
         "name": result["name"], "notes": result["notes"],
-    }, request_id=ctx.request_id)
+    }
+
+    # Broadcast so peers pick up the rename / notes edit without waiting
+    # for a status snapshot. Mirrors the probe_timer_update pattern:
+    # broadcast event + targeted ack share the same payload shape and
+    # the receiving client applies them through the same handler.
+    await ctx.store.publish_event(make_envelope("session_update", payload))
+
+    await send_envelope(ctx.ws, "session_update_ack", payload, request_id=ctx.request_id)
 
 
 # Map message types to their handler functions.  Each handler receives a
