@@ -464,16 +464,24 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         target_duration_secs=target_duration_secs,
     )
 
-    if session_info.get("end_event"):
-        await ctx.store.publish_event(make_envelope("session_end", session_info["end_event"]))
-    await ctx.store.publish_event(make_envelope("session_start", session_info["start_event"]))
-
     new_session_id = session_info["session_id"]
 
+    # Save targets BEFORE publishing the session_start broadcast, so we
+    # can include them in the start_event payload. Peers (web UI, other
+    # iOS clients) then have the full session shape in one message
+    # rather than briefly showing "no targets configured" until a
+    # separate target_update lands.
     if targets:
         for addr in device_addresses:
             await ctx.history.save_targets(new_session_id, addr, targets)
         ctx.evaluator.set_targets(new_session_id, targets)
+
+    if session_info.get("end_event"):
+        await ctx.store.publish_event(make_envelope("session_end", session_info["end_event"]))
+
+    start_event = dict(session_info["start_event"])
+    start_event["targets"] = [t.to_dict() for t in targets]
+    await ctx.store.publish_event(make_envelope("session_start", start_event))
 
     for address in device_addresses:
         await ctx.store.upsert(

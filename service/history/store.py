@@ -99,30 +99,63 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     async def recover_orphaned_sessions(self) -> None:
-        """Close any sessions left open by a previous crash.
+        """Resume any sessions left open by a previous crash or restart.
 
-        Called once at startup, before the BLE scanner begins.
+        Called once at startup, before the BLE scanner begins. Prior
+        behaviour was to **end** orphaned sessions on restart, which was
+        wrong for a cooking app: a BBQ or smoke-session routinely outlives
+        a server reboot (kernel upgrade, container restart, etc.) and the
+        user expects readings to simply resume once devices reconnect.
+
+        Session rows with ``ended_at IS NULL`` are left intact. The most
+        recent one becomes the in-memory ``_current_session_id`` so BLE
+        workers can continue attaching readings to it. On reconnect, any
+        iOS/web client that was attached to the previous session will
+        hydrate into the same session from the ``status`` snapshot.
+
+        If a user abandoned a session indefinitely, they can still end or
+        discard it via the UI. We don't auto-close on age here — the user
+        is the source of truth for "did this cook finish?"
         """
         async with self._lock:
             cursor = await self._conn.execute(
-                "SELECT id, started_at FROM sessions WHERE ended_at IS NULL"
+                "SELECT id, started_at FROM sessions "
+                "WHERE ended_at IS NULL "
+                "ORDER BY started_at DESC"
             )
             orphans = await cursor.fetchall()
+            await cursor.close()
             if not orphans:
                 return
 
-            now_ts = now_iso_utc()
-            for row in orphans:
-                await self._conn.execute(
-                    "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
-                    (now_ts, "server_restart", row["id"]),
-                )
-                LOG.warning(
-                    "Closed orphaned session %s (started %s)",
-                    row["id"],
-                    row["started_at"],
-                )
-            await self._conn.commit()
+            # Multiple orphans shouldn't happen (we only keep one active
+            # at a time), but if they do, the newest wins and the rest
+            # are retroactively ended. That's the closest approximation
+            # to "pick up where we left off" given ambiguous state.
+            primary = orphans[0]
+            self._current_session_id = primary["id"]
+            self._current_session_start_ts = primary["started_at"]
+            LOG.info(
+                "Resumed orphaned session %s (started %s)",
+                primary["id"],
+                primary["started_at"],
+            )
+
+            if len(orphans) > 1:
+                now_ts = now_iso_utc()
+                for row in orphans[1:]:
+                    await self._conn.execute(
+                        "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+                        (now_ts, "server_restart_duplicate", row["id"]),
+                    )
+                    LOG.warning(
+                        "Ended duplicate orphaned session %s (started %s) — "
+                        "kept newer session %s",
+                        row["id"],
+                        row["started_at"],
+                        primary["id"],
+                    )
+                await self._conn.commit()
 
     # ------------------------------------------------------------------
     # Session lifecycle (user-initiated only)
@@ -177,6 +210,11 @@ class HistoryStore:
             self._current_session_id = session_id
             self._current_session_start_ts = now_ts
 
+            # Targets are populated by _handle_session_start AFTER
+            # start_session returns, so we can't include them here. The
+            # caller (the WebSocket handler) reads back the saved targets
+            # and injects them into the start_event payload before
+            # publishing — see websocket.py::_handle_session_start.
             start_event = {
                 "sessionId": session_id,
                 "sessionStartTs": now_ts,
@@ -184,6 +222,7 @@ class HistoryStore:
                 "name": name,
                 "devices": addresses,
                 "targetDurationSecs": target_duration_secs,
+                "targets": [],
             }
 
             return {

@@ -322,11 +322,13 @@ async def test_list_sessions_includes_name_notes(store, sample_address):
 
 @pytest.mark.asyncio
 async def test_recover_orphaned_sessions(tmp_db, sample_address):
-    """Orphaned sessions (no ended_at) should be closed on recovery.
+    """Orphaned sessions (no ended_at) should be RESUMED on recovery.
 
-    Simulates a server restart by creating a session with one store
-    instance, closing it without ending the session, then opening a
-    fresh store (as startup would) and running recovery.
+    A cooking session routinely outlives a server reboot — kernel
+    upgrade, container restart, power blip. The previous behaviour
+    (auto-ending on restart) killed legitimate in-progress cooks and
+    forced the user to start over. Resume the session instead; readings
+    pick up naturally once BLE reconnects.
     """
     # Start a session then "crash" (close store without ending session)
     store1 = HistoryStore(tmp_db, reconnect_grace=60)
@@ -340,12 +342,56 @@ async def test_recover_orphaned_sessions(tmp_db, sample_address):
     await store2.connect()
     await store2.recover_orphaned_sessions()
 
+    # Session is resumed: in-memory current_session_id matches the
+    # orphan and the row is still open.
     state = await store2.get_session_state()
-    assert state["current_session_id"] is None
+    assert state["current_session_id"] == sid
 
+    # The session row is still on disk with ended_at NULL (a cook in
+    # progress), so list_sessions surfaces it with no endReason set.
     sessions = await store2.list_sessions(limit=10)
     assert len(sessions) == 1
-    assert sessions[0]["endReason"] == "server_restart"
+    assert sessions[0]["sessionId"] == sid
+    assert sessions[0]["endReason"] is None
+    assert sessions[0]["endTs"] is None
+    await store2.close()
+
+
+@pytest.mark.asyncio
+async def test_recover_orphaned_sessions_picks_newest_when_multiple(tmp_db):
+    """If multiple orphans exist (should never happen via the API, which
+    always ends the previous session before creating a new one, but could
+    under unusual crash scenarios), the newest is resumed and the rest
+    are ended — keeping the at-most-one-active-session invariant intact.
+    """
+    store1 = HistoryStore(tmp_db, reconnect_grace=60)
+    await store1.connect()
+
+    # Direct SQL to simulate the impossible-via-API state.
+    await store1._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+        ("older", "2026-04-12T00:00:00Z", "user"),
+    )
+    await store1._conn.execute(
+        "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+        ("newer", "2026-04-13T00:00:00Z", "user"),
+    )
+    await store1._conn.commit()
+    await store1.close()
+
+    store2 = HistoryStore(tmp_db, reconnect_grace=60)
+    await store2.connect()
+    await store2.recover_orphaned_sessions()
+
+    state = await store2.get_session_state()
+    assert state["current_session_id"] == "newer"  # newest wins
+
+    # list_sessions returns both: the resumed "newer" with no end and
+    # the ended "older" with server_restart_duplicate as the reason.
+    sessions = await store2.list_sessions(limit=10)
+    by_id = {s["sessionId"]: s for s in sessions}
+    assert by_id["newer"]["endReason"] is None
+    assert by_id["older"]["endReason"] == "server_restart_duplicate"
     await store2.close()
 
 
@@ -359,9 +405,9 @@ async def test_recover_orphaned_sessions_handles_partial_discard(
     transaction wrapped in a try/except that issues ROLLBACK on failure.
     If a crash prevents the commit, every child-table DELETE is rolled
     back atomically by SQLite — so the session row and its children
-    remain intact. On startup, ``recover_orphaned_sessions`` should then
-    close the still-active session as a normal orphan
-    (``end_reason="server_restart"``).
+    remain intact. On startup, ``recover_orphaned_sessions`` resumes
+    the still-active session (rather than ending it), so the cook can
+    continue with its child data intact.
 
     This test encodes that guarantee end-to-end in a single connection
     (equivalent to crash + restart, but simpler to express):
@@ -371,7 +417,8 @@ async def test_recover_orphaned_sessions_handles_partial_discard(
          the except branch issues ROLLBACK, unwinding every DELETE.
       3. Verify all session data is still on disk (rollback was atomic).
       4. Call ``recover_orphaned_sessions`` to simulate the post-restart
-         startup hook and verify it ends the session normally.
+         startup hook and verify it resumes the session, leaving child
+         data intact.
     """
     from service.models.session import TargetConfig
 
@@ -442,15 +489,23 @@ async def test_recover_orphaned_sessions_handles_partial_discard(
     store._current_session_id = None
     store._current_session_start_ts = None
 
-    # 4. Run recovery — the still-active session must be closed with
-    #    end_reason="server_restart". Child data remains intact.
+    # 4. Run recovery — the still-active session is RESUMED (not ended)
+    #    so the cook can continue after the restart. Child data is
+    #    retained intact by the earlier discard rollback.
     await store.recover_orphaned_sessions()
 
+    # Session remains active (ended_at still NULL) and in-memory state
+    # points at it again.
+    state = await store.get_session_state()
+    assert state["current_session_id"] == sid
+    # The row is still in the sessions table (active), so list_sessions
+    # returns it with endReason=None.
     sessions = await store.list_sessions(limit=10)
     assert len(sessions) == 1
     assert sessions[0]["sessionId"] == sid
-    assert sessions[0]["endReason"] == "server_restart"
+    assert sessions[0]["endReason"] is None
 
+    # Child rows from the rolled-back discard are still on disk.
     assert await _count(store, "session_devices", sid) == 1
     assert await _count(store, "probe_readings", sid) == 1
     assert await _count(store, "session_notes", sid) == 1
