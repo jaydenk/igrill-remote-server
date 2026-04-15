@@ -276,7 +276,7 @@ class PushService:
 
         self._last_la_update_ts = time.monotonic()
 
-        content_state = self._build_content_state(reading)
+        content_state = await self._build_content_state(reading)
 
         from aioapns import NotificationRequest, PushType
 
@@ -315,21 +315,117 @@ class PushService:
             except Exception:
                 LOG.exception("Failed to send LA update to %s…", token[:8])
 
-    @staticmethod
-    def _build_content_state(reading: dict) -> dict:
+    async def _build_content_state(self, reading: dict) -> dict:
         """Build the content-state dict from a reading payload.
 
-        Extracts probe data and device metadata into the format expected
-        by the iOS Live Activity.
+        Queries the DB for per-probe labels, targets, and timer state so the
+        payload satisfies the iOS ``CookSessionAttributes.ContentState`` schema.
+        All non-optional fields (``index``, ``label``, ``unplugged``,
+        ``recentTemps``) are always present; optional fields are included when
+        data is available.
+
+        JSON field names are camelCase to match the Swift struct property names
+        (Swift uses property names as coding keys by default when no CodingKeys
+        enum is declared).
         """
         payload = reading.get("payload", {})
         data = payload.get("data", {})
-        probes = data.get("probes", [])
+        raw_probes = data.get("probes", [])
+        session_id = payload.get("sessionId")
+        address = payload.get("sensorId")
+        unit = data.get("unit", "C")
+
+        # Fetch per-probe targets from DB when a session is active.
+        targets_by_index: dict[int, dict] = {}
+        if session_id and address:
+            try:
+                cursor = await self._db.execute(
+                    "SELECT probe_index, label, mode, target_value "
+                    "FROM session_targets "
+                    "WHERE session_id = ? AND address = ?",
+                    (session_id, address),
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    targets_by_index[row["probe_index"]] = {
+                        "label": row["label"],
+                        "mode": row["mode"],
+                        "target_value": row["target_value"],
+                    }
+            except Exception:
+                LOG.warning(
+                    "Failed to fetch session_targets for session=%s address=%s",
+                    session_id,
+                    address,
+                    exc_info=True,
+                )
+
+        # Fetch per-probe timers from DB when a session is active.
+        timers_by_index: dict[int, dict] = {}
+        if session_id and address:
+            try:
+                cursor = await self._db.execute(
+                    "SELECT probe_index, mode, duration_secs, started_at, "
+                    "paused_at, accumulated_secs, completed_at "
+                    "FROM session_timers "
+                    "WHERE session_id = ? AND address = ?",
+                    (session_id, address),
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    timers_by_index[row["probe_index"]] = {
+                        "mode": row["mode"],
+                        "durationSecs": row["duration_secs"],
+                        "startedAt": row["started_at"],
+                        "pausedAt": row["paused_at"],
+                        "accumulatedSecs": row["accumulated_secs"],
+                        "completedAt": row["completed_at"],
+                    }
+            except Exception:
+                LOG.warning(
+                    "Failed to fetch session_timers for session=%s address=%s",
+                    session_id,
+                    address,
+                    exc_info=True,
+                )
+
+        # Build the ProbeState list matching the iOS schema.
+        probe_states = []
+        for probe in raw_probes:
+            index = probe.get("index", 0)
+            temperature = probe.get("temperature")
+            target_row = targets_by_index.get(index, {})
+
+            # Use target_value only for fixed-mode targets; treat range mode
+            # as no target (the iOS widget only renders a single target line).
+            mode = target_row.get("mode", "fixed")
+            target_value = target_row.get("target_value") if mode == "fixed" else None
+
+            label_raw = target_row.get("label") or ""
+            label = label_raw if label_raw else f"Probe {index}"
+
+            timer_row = timers_by_index.get(index)
+            timer = timer_row if timer_row is not None else None
+
+            probe_state: dict = {
+                "index": index,
+                "label": label,
+                "unplugged": temperature is None,
+                "recentTemps": [],  # server has no rolling buffer; widget renders empty sparkline
+            }
+            if temperature is not None:
+                probe_state["temperature"] = temperature
+            if target_value is not None:
+                probe_state["target"] = target_value
+            if timer is not None:
+                probe_state["timer"] = timer
+
+            probe_states.append(probe_state)
 
         return {
-            "probes": probes,
-            "batteryPercent": data.get("battery_percent"),
-            "unit": data.get("unit", "C"),
+            "probes": probe_states,
+            "unit": unit,
+            "featuredProbeIndex": None,
         }
 
     async def _remove_la_token(self, la_token: str) -> None:

@@ -16,7 +16,7 @@ from service.push.service import PushService
 
 @pytest_asyncio.fixture
 async def db(tmp_path):
-    """Create a temporary SQLite database with the push_tokens table."""
+    """Create a temporary SQLite database with push_tokens and session tables."""
     import aiosqlite
 
     db_path = str(tmp_path / "test.db")
@@ -29,6 +29,39 @@ async def db(tmp_path):
             live_activity_token TEXT,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id          TEXT PRIMARY KEY,
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT,
+            start_reason TEXT NOT NULL,
+            end_reason  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS session_targets (
+            session_id   TEXT NOT NULL REFERENCES sessions(id),
+            address      TEXT NOT NULL,
+            probe_index  INTEGER NOT NULL,
+            mode         TEXT NOT NULL DEFAULT 'fixed',
+            target_value REAL,
+            range_low    REAL,
+            range_high   REAL,
+            label        TEXT,
+            PRIMARY KEY (session_id, address, probe_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_timers (
+            session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            address          TEXT NOT NULL,
+            probe_index      INTEGER NOT NULL,
+            mode             TEXT NOT NULL,
+            duration_secs    INTEGER,
+            started_at       TEXT,
+            paused_at        TEXT,
+            accumulated_secs INTEGER NOT NULL DEFAULT 0,
+            completed_at     TEXT,
+            PRIMARY KEY (session_id, address, probe_index)
         );
         """
     )
@@ -320,3 +353,211 @@ class TestLiveActivityThrottle:
         svc = _make_enabled_service(db)
         svc._last_la_update_ts = time.monotonic() - 14.9
         assert svc.should_send_la_update() is False
+
+
+# ---------------------------------------------------------------------------
+# _build_content_state
+# ---------------------------------------------------------------------------
+
+
+class TestBuildContentState:
+    """_build_content_state emits the full iOS ContentState schema."""
+
+    @pytest.mark.asyncio
+    async def test_no_session_id_returns_sensible_defaults(self, db):
+        """A reading without a sessionId should not crash and should include
+        all non-optional ProbeState fields with fallback values."""
+        svc = _make_enabled_service(db)
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": None,
+                "data": {
+                    "unit": "C",
+                    "probes": [
+                        {"index": 1, "temperature": 82.5},
+                        {"index": 2, "temperature": None},
+                    ],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+
+        assert state["unit"] == "C"
+        assert state["featuredProbeIndex"] is None
+        assert len(state["probes"]) == 2
+
+        p1 = state["probes"][0]
+        assert p1["index"] == 1
+        assert p1["label"] == "Probe 1"
+        assert p1["unplugged"] is False
+        assert p1["recentTemps"] == []
+        assert p1["temperature"] == 82.5
+
+        p2 = state["probes"][1]
+        assert p2["index"] == 2
+        assert p2["label"] == "Probe 2"
+        assert p2["unplugged"] is True
+        assert p2["recentTemps"] == []
+        assert "temperature" not in p2
+
+    @pytest.mark.asyncio
+    async def test_with_session_uses_db_label_and_target(self, db):
+        """When a session exists in the DB the probe label and target_value are
+        pulled from session_targets."""
+        svc = _make_enabled_service(db)
+
+        # Seed session and target rows.
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-1", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("sess-1", "AA:BB:CC:DD:EE:FF", 1, "fixed", 90.0, "Brisket"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-1",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 75.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+
+        p1 = state["probes"][0]
+        assert p1["label"] == "Brisket"
+        assert p1["target"] == 90.0
+        assert p1["unplugged"] is False
+        assert p1["temperature"] == 75.0
+
+    @pytest.mark.asyncio
+    async def test_range_mode_target_omitted(self, db):
+        """For range-mode targets, target should not appear in the probe state."""
+        svc = _make_enabled_service(db)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-2", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, range_low, range_high, label) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sess-2", "AA:BB:CC:DD:EE:FF", 1, "range", None, 70.0, 80.0, "Ribs"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-2",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 75.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+
+        p1 = state["probes"][0]
+        assert p1["label"] == "Ribs"
+        assert "target" not in p1
+
+    @pytest.mark.asyncio
+    async def test_timer_included_when_present(self, db):
+        """When a session_timers row exists the timer dict is included with
+        camelCase field names matching the iOS ProbeTimerAnchors struct."""
+        svc = _make_enabled_service(db)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-3", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_timers "
+            "(session_id, address, probe_index, mode, duration_secs, "
+            "started_at, paused_at, accumulated_secs, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sess-3", "AA:BB:CC:DD:EE:FF", 1,
+                "count_up", None, "2026-04-15T10:00:00Z", None, 0, None,
+            ),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-3",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 60.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+
+        p1 = state["probes"][0]
+        assert "timer" in p1
+        timer = p1["timer"]
+        assert timer["mode"] == "count_up"
+        assert timer["startedAt"] == "2026-04-15T10:00:00Z"
+        assert timer["pausedAt"] is None
+        assert timer["completedAt"] is None
+        assert timer["accumulatedSecs"] == 0
+        assert timer["durationSecs"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_timer_when_no_db_row(self, db):
+        """Probe with no timer row in the DB should not have a 'timer' key."""
+        svc = _make_enabled_service(db)
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": None,
+                "data": {
+                    "unit": "F",
+                    "probes": [{"index": 1, "temperature": 165.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+
+        p1 = state["probes"][0]
+        assert "timer" not in p1
+        assert state["unit"] == "F"
+
+    @pytest.mark.asyncio
+    async def test_battery_percent_not_in_output(self, db):
+        """batteryPercent must not appear in the content state — the iOS
+        ContentState struct has no such field."""
+        svc = _make_enabled_service(db)
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": None,
+                "data": {
+                    "unit": "C",
+                    "battery_percent": 75,
+                    "probes": [{"index": 1, "temperature": 80.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        assert "batteryPercent" not in state
