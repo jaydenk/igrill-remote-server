@@ -257,11 +257,17 @@ async def _handle_status(ctx: _MessageContext) -> None:
 
     active_targets: list[dict[str, Any]] = []
     session_devices: list[dict[str, Any]] = []
+    session_timers: list[dict[str, Any]] = []
     current_sid = session_state.get("current_session_id")
     if current_sid is not None:
         targets = await ctx.history.get_targets(current_sid)
         active_targets = [t.to_dict() for t in targets]
         session_devices = await ctx.history.get_session_devices(current_sid)
+        # Re-hydrate per-probe timers on reconnect. Without this, iOS's
+        # in-memory ProbeTimerStore stays empty after an app restart
+        # until the next mutation triggers a probe_timer_update, and
+        # the Live Activity + probe tiles lose their timer display.
+        session_timers = await ctx.history.get_timers(current_sid)
 
     status_payload: dict[str, Any] = {
         "hasData": has_data,
@@ -275,6 +281,7 @@ async def _handle_status(ctx: _MessageContext) -> None:
         "sessionTimeoutSeconds": session_state.get("session_timeout_seconds"),
         "activeTargets": active_targets,
         "sessionDevices": session_devices,
+        "sessionTimers": session_timers,
     }
     if current_sid is not None:
         meta = await ctx.history.get_session_metadata(current_sid)
