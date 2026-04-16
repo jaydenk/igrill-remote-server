@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import time
+from typing import Any, Optional
 
 from aiohttp import web
 
@@ -300,6 +301,7 @@ async def simulate_start_handler(request: web.Request) -> web.Response:
 
     speed = body.get("speed", 10)
     probes = body.get("probes", 4)
+    probe_timers_raw = body.get("probe_timers")
 
     try:
         speed = float(speed)
@@ -307,7 +309,24 @@ async def simulate_start_handler(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return web.json_response({"error": "speed must be a number, probes must be an integer"}, status=400)
 
-    result = await simulator.start(speed=speed, probes=probes)
+    probe_timers: Optional[dict[int, dict[str, Any]]] = None
+    if probe_timers_raw is not None:
+        if not isinstance(probe_timers_raw, dict):
+            return web.json_response(
+                {"error": "probe_timers must be an object keyed by probe index"},
+                status=400,
+            )
+        probe_timers = {}
+        for key, spec in probe_timers_raw.items():
+            try:
+                probe_timers[int(key)] = spec
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": f"probe_timers key {key!r} is not an integer"},
+                    status=400,
+                )
+
+    result = await simulator.start(speed=speed, probes=probes, probe_timers=probe_timers)
     if "error" in result:
         return web.json_response(result, status=409)
     return web.json_response(result)
@@ -329,6 +348,79 @@ async def simulate_stop_handler(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def simulate_probe_timer_handler(request: web.Request) -> web.Response:
+    """POST /api/v1/simulate/probe-timer — drive a simulated session's
+    per-probe timer through the same dispatch path the real device uses.
+
+    Body: { "probe_index": int, "action": str,
+            "mode": str?, "duration_secs": int? }
+    """
+    from service.api.websocket import is_authorized
+    from service.api.envelope import make_envelope
+    from service.simulate.runner import SIM_ADDRESS
+
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    history = request.app.get("history")
+    store = request.app.get("store")
+    if history is None or store is None:
+        return web.json_response(
+            {"error": "history store not available"}, status=503,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    probe_index = body.get("probe_index")
+    action = body.get("action")
+    if not isinstance(probe_index, int):
+        return web.json_response(
+            {"error": "probe_index must be an integer"}, status=400,
+        )
+    if not isinstance(action, str):
+        return web.json_response(
+            {"error": "action is required"}, status=400,
+        )
+
+    session_state = await history.get_session_state()
+    current_sid = session_state.get("current_session_id")
+    if current_sid is None:
+        return web.json_response({"error": "no active session"}, status=409)
+
+    try:
+        if action == "upsert":
+            mode = body.get("mode")
+            duration_secs = body.get("duration_secs")
+            if mode == "count_down" and duration_secs is None:
+                return web.json_response(
+                    {"error": "duration_secs required for count_down"},
+                    status=400,
+                )
+            row = await history.upsert_timer(
+                current_sid, SIM_ADDRESS, probe_index, mode, duration_secs,
+            )
+        elif action == "start":
+            row = await history.start_timer(current_sid, SIM_ADDRESS, probe_index)
+        elif action == "pause":
+            row = await history.pause_timer(current_sid, SIM_ADDRESS, probe_index)
+        elif action == "resume":
+            row = await history.resume_timer(current_sid, SIM_ADDRESS, probe_index)
+        elif action == "reset":
+            row = await history.reset_timer(current_sid, SIM_ADDRESS, probe_index)
+        else:
+            return web.json_response(
+                {"error": f"unsupported action: {action}"}, status=400,
+            )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    await store.publish_event(make_envelope("probe_timer_update", row))
+    return web.json_response({"ok": True, "row": row})
+
+
 # ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
@@ -348,3 +440,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_put("/api/config/log-levels", log_levels_handler)
     app.router.add_post("/api/v1/simulate/start", simulate_start_handler)
     app.router.add_post("/api/v1/simulate/stop", simulate_stop_handler)
+    app.router.add_post(
+        "/api/v1/simulate/probe-timer", simulate_probe_timer_handler
+    )

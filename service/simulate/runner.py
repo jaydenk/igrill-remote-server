@@ -52,7 +52,12 @@ class SimulationRunner:
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def start(self, speed: float = 10, probes: int = 4) -> dict[str, Any]:
+    async def start(
+        self,
+        speed: float = 10,
+        probes: int = 4,
+        probe_timers: Optional[dict[int, dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
         if self.is_running:
             return {"error": "simulation already running"}
 
@@ -92,6 +97,24 @@ class SimulationRunner:
         targets = self._build_targets(probes)
         await self._history.save_targets(self._session_id, SIM_ADDRESS, targets)
         self._evaluator.set_targets(self._session_id, targets)
+
+        # Optional pre-attached timers — exercised by tests and sim clients
+        # that need the per-probe-timer paths without real hardware.
+        if probe_timers:
+            for probe_index, spec in probe_timers.items():
+                mode = spec.get("mode")
+                duration_secs = spec.get("duration_secs")
+                if mode not in ("count_up", "count_down"):
+                    continue
+                if mode == "count_down" and duration_secs is None:
+                    continue
+                await self._history.upsert_timer(
+                    self._session_id,
+                    SIM_ADDRESS,
+                    int(probe_index),
+                    mode,
+                    duration_secs,
+                )
 
         # Update device with session info
         await self.store.upsert(
