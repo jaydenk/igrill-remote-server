@@ -72,3 +72,29 @@ class TestSimulationRunner:
         await runner.stop()
         # Check that readings were published
         assert runner._tick > 0
+
+    @pytest.mark.asyncio
+    async def test_start_with_probe_timers_creates_timer_rows(self, runner, history):
+        """SimulationRunner.start(probe_timers=...) writes session_timers rows
+        so end-to-end LA + per-probe-timer flows can be exercised by the sim."""
+        result = await runner.start(
+            speed=10,
+            probes=2,
+            probe_timers={
+                1: {"mode": "count_up"},
+                2: {"mode": "count_down", "duration_secs": 600},
+            },
+        )
+        assert result["ok"] is True
+        session_id = result["sessionId"]
+
+        # Stop immediately so we don't race the loop.
+        await runner.stop()
+
+        rows = await history.get_timers(session_id)
+        by_index = {r["probe_index"]: r for r in rows}
+        assert set(by_index.keys()) == {1, 2}
+        assert by_index[1]["mode"] == "count_up"
+        assert by_index[1]["duration_secs"] is None
+        assert by_index[2]["mode"] == "count_down"
+        assert by_index[2]["duration_secs"] == 600
