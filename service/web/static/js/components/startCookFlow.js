@@ -679,6 +679,20 @@
               requestId: generateRequestId(),
               payload: timerPayload,
             });
+            /* upsert leaves the timer paused with started_at=NULL. The
+             * iOS Start Cook flow fires a follow-up `start` (see
+             * StartCookSheet.swift) so the timer ticks from cook-start
+             * — match that contract here so the two clients agree. */
+            send({
+              v: 2,
+              type: "probe_timer_request",
+              requestId: generateRequestId(),
+              payload: {
+                action: "start",
+                address: pr.address,
+                probe_index: pr.probeIndex,
+              },
+            });
           } catch (_) { /* ignore */ }
         });
         close();

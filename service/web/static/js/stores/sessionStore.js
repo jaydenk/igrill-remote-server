@@ -183,10 +183,32 @@
       case "probe_timer_ack": {
         if (type === "probe_timer_ack" && payload.ok === false) return state;
         if (!state.activeSession) return state;
-        var timer = payload.timer || payload;
-        if (!timer || timer.address == null || timer.probeIndex == null) {
-          return state;
-        }
+        /* The server broadcasts the raw `session_timers` row, which uses
+         * snake_case keys (probe_index, started_at, ...). The renderer and
+         * the rest of this store consume camelCase. Normalise here so a
+         * single shape lives in state. iOS handles this via Codable
+         * CodingKeys in ProbeTimerUpdatePayload.swift; the web client has
+         * no analogous decoder so the mapping happens here. */
+        var raw = payload.timer || payload;
+        if (!raw || raw.address == null) return state;
+        var probeIdx = raw.probeIndex != null ? raw.probeIndex : raw.probe_index;
+        if (probeIdx == null) return state;
+        var timer = {
+          sessionId: raw.sessionId != null ? raw.sessionId : raw.session_id,
+          address: raw.address,
+          probeIndex: probeIdx,
+          mode: raw.mode,
+          durationSecs: raw.durationSecs != null ? raw.durationSecs : raw.duration_secs,
+          startedAt: raw.startedAt != null ? raw.startedAt : raw.started_at,
+          pausedAt: raw.pausedAt != null ? raw.pausedAt : raw.paused_at,
+          accumulatedSecs:
+            raw.accumulatedSecs != null
+              ? raw.accumulatedSecs
+              : raw.accumulated_secs != null
+                ? raw.accumulated_secs
+                : 0,
+          completedAt: raw.completedAt != null ? raw.completedAt : raw.completed_at,
+        };
         var next5 = shallowCopy(state);
         next5.activeSession = shallowCopy(state.activeSession);
         var existing = state.activeSession.timers || [];

@@ -446,7 +446,13 @@
           pre_alert_offset: 5,
           reminder_interval_secs: parseInt(remSelect.value, 10) || 0,
         };
-        if (probe.label) config.label = probe.label;
+        /* Don't auto-stamp probe.label as the target label. The picker's
+         * `probe.label` is a presentation string ("DeviceName — Probe 2")
+         * built only for the chooser UI; persisting it as the target's
+         * label was leaking that prefix into both clients and diverging
+         * from iOS, which leaves label nil unless the user types one.
+         * Both clients now agree: target.label is user-typed only, and
+         * the renderer falls back to "Probe N" when nil. */
 
         /* Pre-alert offset */
         var pre = parseFloat(state.preAlert);

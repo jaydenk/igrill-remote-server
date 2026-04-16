@@ -766,7 +766,17 @@
     function renderProbeCards() {
       var state = getState();
       var session = state.activeSession;
-      var targets = (session && session.targets) || [];
+      var rawTargets = (session && session.targets) || [];
+      /* Display order = ascending probe index. The server returns targets
+       * in DB insertion order (which mirrors the order users added them);
+       * for a multi-probe cook the user expects Probe 1 → 2 → 3 → 4 left
+       * to right regardless of which one was configured first. Slice to
+       * avoid mutating store-owned state. */
+      var targets = rawTargets.slice().sort(function (a, b) {
+        var ai = a && a.probe_index != null ? a.probe_index : 0;
+        var bi = b && b.probe_index != null ? b.probe_index : 0;
+        return ai - bi;
+      });
 
       while (probesGridEl.firstChild) {
         probesGridEl.removeChild(probesGridEl.firstChild);

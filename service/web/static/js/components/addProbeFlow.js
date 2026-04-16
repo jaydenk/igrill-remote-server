@@ -371,6 +371,21 @@
           requestId: generateRequestId(),
           payload: payload,
         });
+        /* upsert leaves the timer paused. iOS's AddProbeSheet auto-starts
+         * after configure (see AddProbeSheet.swift addTarget) so the user
+         * doesn't have to tap Start a second time. Mirror that here so
+         * the two clients agree on the "added timer ticks immediately"
+         * contract. */
+        send({
+          v: 2,
+          type: "probe_timer_request",
+          requestId: generateRequestId(),
+          payload: {
+            action: "start",
+            address: pendingRow.address,
+            probe_index: pendingRow.probeIndex,
+          },
+        });
       } catch (_) { /* fire and forget */ }
     }
 
