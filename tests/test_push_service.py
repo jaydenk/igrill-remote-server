@@ -624,3 +624,194 @@ async def test_push_service_owns_its_own_connection(db_path, db):
     cursor = await db.execute("SELECT COUNT(*) AS n FROM push_tokens")
     row = await cursor.fetchone()
     assert row["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# LA token preservation on upsert (E22)
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertTokenPreservesLATokenOnNull:
+    @pytest.mark.asyncio
+    async def test_null_la_token_does_not_clobber_existing(self, db, db_path):
+        """If a caller re-registers only the APNS token (e.g. APNS token
+        rotation) WITHOUT a liveActivityToken, the existing stored LA
+        token must be preserved — iOS otherwise silently loses Live
+        Activity updates until the user starts another session."""
+        svc = await _make_enabled_service(db_path)
+        await svc.upsert_token("device_token_abc", live_activity_token="la_xyz")
+        await svc.upsert_token("device_token_abc")  # no LA token this time
+
+        cursor = await db.execute(
+            "SELECT live_activity_token FROM push_tokens WHERE token = ?",
+            ("device_token_abc",),
+        )
+        row = await cursor.fetchone()
+        assert row["live_activity_token"] == "la_xyz", \
+            "APNS-only re-register nulled the previously-stored LA token"
+
+    @pytest.mark.asyncio
+    async def test_explicit_la_token_replaces_existing(self, db, db_path):
+        """An explicit new liveActivityToken still replaces the old one —
+        this is how iOS rotates LA tokens session-to-session."""
+        svc = await _make_enabled_service(db_path)
+        await svc.upsert_token("device_token_abc", live_activity_token="la_old")
+        await svc.upsert_token("device_token_abc", live_activity_token="la_new")
+
+        cursor = await db.execute(
+            "SELECT live_activity_token FROM push_tokens WHERE token = ?",
+            ("device_token_abc",),
+        )
+        row = await cursor.fetchone()
+        assert row["live_activity_token"] == "la_new"
+
+
+# ---------------------------------------------------------------------------
+# Live Activity teardown on session end (E23)
+# ---------------------------------------------------------------------------
+
+
+class TestEndLiveActivities:
+    @pytest.mark.asyncio
+    async def test_end_live_activities_sends_end_event_to_all_la_tokens(
+        self, db, db_path,
+    ):
+        """end_live_activities must send aps.event='end' to every stored
+        LA token so the Live Activity actually dismisses from the lock
+        screen on session end."""
+        import sys
+        import types
+
+        # aioapns isn't installed in the test environment — stub it out
+        # just enough that end_live_activities' local import succeeds.
+        fake_aioapns = types.ModuleType("aioapns")
+
+        class _FakeNotificationRequest:
+            def __init__(self, *, device_token, message, notification_id,
+                         push_type, apns_topic=None):
+                self.device_token = device_token
+                self.message = message
+
+        class _FakePushType:
+            LIVEACTIVITY = "liveactivity"
+
+        fake_aioapns.NotificationRequest = _FakeNotificationRequest
+        fake_aioapns.PushType = _FakePushType
+
+        with patch.dict(sys.modules, {"aioapns": fake_aioapns}):
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1", live_activity_token="la1")
+            await svc.upsert_token("t2", live_activity_token="la2")
+            await svc.upsert_token("t3", live_activity_token=None)  # no LA
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(
+                return_value=MagicMock(is_successful=True, description=""),
+            )
+            svc._client = mock_client
+
+            await svc.end_live_activities()
+
+        assert mock_client.send_notification.await_count == 2
+        sent_tokens = {
+            call.args[0].device_token
+            for call in mock_client.send_notification.await_args_list
+        }
+        assert sent_tokens == {"la1", "la2"}
+        for call in mock_client.send_notification.await_args_list:
+            request = call.args[0]
+            assert request.message["aps"]["event"] == "end"
+
+    @pytest.mark.asyncio
+    async def test_end_live_activities_noop_when_disabled(self, db, db_path):
+        """Disabled push service end_live_activities is a silent no-op."""
+        svc = await _make_service(db_path)  # no credentials → disabled
+        assert svc.enabled is False
+        await svc.end_live_activities()
+
+
+# ---------------------------------------------------------------------------
+# LA throttle only advances after success (E25)
+# ---------------------------------------------------------------------------
+
+
+class TestLiveActivityThrottleAfterSuccess:
+    @pytest.mark.asyncio
+    async def test_throttle_does_not_advance_on_total_failure(
+        self, db, db_path,
+    ):
+        """If every LA push fails (e.g. APNS connection dead), the
+        throttle must NOT advance — otherwise the next ~15s of live
+        readings also carry no push, compounding the outage."""
+        import sys
+        import types
+
+        fake_aioapns = types.ModuleType("aioapns")
+
+        class _FakeNotificationRequest:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class _FakePushType:
+            LIVEACTIVITY = "liveactivity"
+
+        fake_aioapns.NotificationRequest = _FakeNotificationRequest
+        fake_aioapns.PushType = _FakePushType
+
+        with patch.dict(sys.modules, {"aioapns": fake_aioapns}):
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1", live_activity_token="la1")
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(
+                return_value=MagicMock(
+                    is_successful=False, description="TransientFailure",
+                ),
+            )
+            svc._client = mock_client
+
+            before = svc._last_la_update_ts
+            reading = {
+                "payload": {"sensorId": "A", "sessionId": None,
+                            "data": {"unit": "C", "probes": []}},
+            }
+            await svc.send_live_activity_update(reading)
+
+        assert svc._last_la_update_ts == before, \
+            "throttle advanced despite zero successful pushes"
+
+    @pytest.mark.asyncio
+    async def test_throttle_advances_on_any_success(self, db, db_path):
+        import sys
+        import types
+
+        fake_aioapns = types.ModuleType("aioapns")
+
+        class _FakeNotificationRequest:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class _FakePushType:
+            LIVEACTIVITY = "liveactivity"
+
+        fake_aioapns.NotificationRequest = _FakeNotificationRequest
+        fake_aioapns.PushType = _FakePushType
+
+        with patch.dict(sys.modules, {"aioapns": fake_aioapns}):
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1", live_activity_token="la1")
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(
+                return_value=MagicMock(is_successful=True, description=""),
+            )
+            svc._client = mock_client
+
+            before = svc._last_la_update_ts
+            reading = {
+                "payload": {"sensorId": "A", "sessionId": None,
+                            "data": {"unit": "C", "probes": []}},
+            }
+            await svc.send_live_activity_update(reading)
+
+        assert svc._last_la_update_ts > before

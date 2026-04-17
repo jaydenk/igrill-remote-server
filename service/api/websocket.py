@@ -1036,6 +1036,7 @@ async def broadcast_events(app: web.Application) -> None:
     hub: WebSocketHub = app["hub"]
     push_service = app.get("push_service")
     alert_types = {"target_approaching", "target_reached", "target_exceeded", "target_reminder"}
+    la_teardown_types = {"session_end", "session_discarded"}
 
     while True:
         event = await store.next_event()
@@ -1047,3 +1048,12 @@ async def broadcast_events(app: web.Application) -> None:
                 await push_service.send_alert(event)
             except Exception:
                 LOG.exception("Failed to send push for event %s", event.get("type"))
+
+        # Tear down Live Activities whenever a session finishes. Without
+        # this the LA stays on the lock screen with stale probe data
+        # until iOS's TTL expires (8–12 hours).
+        if push_service and event.get("type") in la_teardown_types:
+            try:
+                await push_service.end_live_activities()
+            except Exception:
+                LOG.exception("Failed to end live activities on %s", event.get("type"))

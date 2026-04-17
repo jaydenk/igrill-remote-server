@@ -164,12 +164,24 @@ class PushService:
         token: str,
         live_activity_token: Optional[str] = None,
     ) -> None:
-        """Insert or replace a device push token."""
+        """Insert or update a device push token.
+
+        The LA token is merged with COALESCE: passing ``None`` for
+        ``live_activity_token`` no longer nulls a previously-stored
+        value. iOS clients re-register just the APNS token on rotation
+        without a current LA token, and the old ``INSERT OR REPLACE``
+        silently dropped the LA token in that path — breaking Live
+        Activity updates until the user started another session.
+        """
         await self._db.execute(
-            "INSERT OR REPLACE INTO push_tokens "
+            "INSERT INTO push_tokens "
             "(token, live_activity_token, created_at, updated_at) "
             "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) "
+            "ON CONFLICT(token) DO UPDATE SET "
+            "live_activity_token = COALESCE(excluded.live_activity_token, "
+            "live_activity_token), "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
             (token, live_activity_token),
         )
         await self._db.commit()
@@ -317,14 +329,13 @@ class PushService:
         if not la_tokens:
             return
 
-        self._last_la_update_ts = time.monotonic()
-
         content_state = await self._build_content_state(reading)
 
         from aioapns import NotificationRequest, PushType
 
         la_topic = f"{self._bundle_id}.push-type.liveactivity"
 
+        any_success = False
         for token in la_tokens:
             request = NotificationRequest(
                 device_token=token,
@@ -342,7 +353,9 @@ class PushService:
 
             try:
                 result = await self._client.send_notification(request)
-                if not result.is_successful:
+                if result.is_successful:
+                    any_success = True
+                else:
                     LOG.warning(
                         "APNS LA update failed for %s…: %s",
                         token[:8],
@@ -357,6 +370,57 @@ class PushService:
                         )
             except Exception:
                 LOG.exception("Failed to send LA update to %s…", token[:8])
+
+        # Only advance the throttle when at least one push succeeded —
+        # otherwise a dead APNS connection during this window would
+        # silently lock out the next ~15s of updates as well.
+        if any_success:
+            self._last_la_update_ts = time.monotonic()
+
+    async def end_live_activities(self) -> None:
+        """Send ``aps.event = "end"`` to every registered Live Activity
+        token so the lock-screen widget dismisses when the session ends.
+
+        Invoked from ``broadcast_events`` on ``session_end`` and
+        ``session_discarded``. Without this the LA stays alive on the
+        user's lock screen with stale probe data for up to 8–12 hours
+        (iOS's LA TTL) after a cook finishes.
+        """
+        if not self._enabled or self._client is None:
+            return
+
+        la_tokens = await self._get_la_tokens()
+        if not la_tokens:
+            return
+
+        from aioapns import NotificationRequest, PushType
+
+        la_topic = f"{self._bundle_id}.push-type.liveactivity"
+
+        for token in la_tokens:
+            request = NotificationRequest(
+                device_token=token,
+                message={
+                    "aps": {
+                        "timestamp": int(time.time()),
+                        "event": "end",
+                    },
+                },
+                notification_id=str(uuid4()),
+                push_type=PushType.LIVEACTIVITY,
+                apns_topic=la_topic,
+            )
+            try:
+                result = await self._client.send_notification(request)
+                if not result.is_successful:
+                    LOG.warning(
+                        "APNS LA end failed for %s…: %s",
+                        token[:8], result.description,
+                    )
+                    if result.description in _INVALID_TOKEN_REASONS:
+                        await self._remove_la_token(token)
+            except Exception:
+                LOG.exception("Failed to send LA end to %s…", token[:8])
 
     async def _build_content_state(self, reading: dict) -> dict:
         """Build the content-state dict from a reading payload.

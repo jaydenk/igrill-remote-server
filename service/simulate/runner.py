@@ -229,6 +229,18 @@ class SimulationRunner:
             session_id = session_state.get("current_session_id")
             session_start_ts = session_state.get("current_session_start_ts")
 
+            # If the current session is no longer our simulation's own
+            # session — e.g. a real client started a cook without first
+            # stopping the simulator — stop here. Otherwise the
+            # simulator would write synthetic probe data into the real
+            # cook's history, corrupting it.
+            if self._session_id is not None and session_id != self._session_id:
+                LOG.info(
+                    "Simulation session %s diverged from current %s — stopping",
+                    self._session_id, session_id,
+                )
+                return
+
             reading_payload = build_reading_payload(
                 device_entry,
                 session_id=session_id,

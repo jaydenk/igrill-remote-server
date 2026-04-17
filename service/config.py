@@ -71,6 +71,36 @@ class Config:
     apns_bundle_id: str = ""
     apns_use_sandbox: bool = True
 
+    def warn_if_misconfigured(self) -> None:
+        """Log a prominent warning for any configuration state that will
+        silently degrade user-visible features at runtime.
+
+        Called once from ``main.run`` after config is loaded so operators
+        see the warning in the boot log rather than discovering that
+        pushes don't fire hours later.
+        """
+        apns_fields = {
+            "IGRILL_APNS_KEY_PATH": self.apns_key_path,
+            "IGRILL_APNS_KEY_ID": self.apns_key_id,
+            "IGRILL_APNS_TEAM_ID": self.apns_team_id,
+            "IGRILL_APNS_BUNDLE_ID": self.apns_bundle_id,
+        }
+        missing = [name for name, value in apns_fields.items() if not value]
+        set_fields = [name for name, value in apns_fields.items() if value]
+        if missing and set_fields:
+            LOG.warning(
+                "APNS partially configured — push disabled. Missing: %s (set: %s). "
+                "Remote alerts and Live Activity updates will NOT fire.",
+                ", ".join(missing),
+                ", ".join(set_fields),
+            )
+        elif missing:
+            LOG.info(
+                "APNS credentials not configured — push disabled. "
+                "Remote alerts and Live Activity updates will NOT fire. "
+                "Set IGRILL_APNS_* env vars to enable.",
+            )
+
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
@@ -81,13 +111,13 @@ class Config:
                 MIN_POLL_INTERVAL,
                 MAX_POLL_INTERVAL,
             ),
-            timeout=_read_int_env("IGRILL_TIMEOUT", DEFAULT_TIMEOUT),
-            scan_interval=_read_int_env("IGRILL_SCAN_INTERVAL", DEFAULT_SCAN_INTERVAL),
-            scan_timeout=_read_int_env("IGRILL_SCAN_TIMEOUT", DEFAULT_SCAN_TIMEOUT),
+            timeout=_read_int_env("IGRILL_TIMEOUT", DEFAULT_TIMEOUT, min_value=1),
+            scan_interval=_read_int_env("IGRILL_SCAN_INTERVAL", DEFAULT_SCAN_INTERVAL, min_value=1),
+            scan_timeout=_read_int_env("IGRILL_SCAN_TIMEOUT", DEFAULT_SCAN_TIMEOUT, min_value=1),
             reconnect_grace=_read_int_env(
-                "IGRILL_RECONNECT_GRACE", DEFAULT_RECONNECT_GRACE
+                "IGRILL_RECONNECT_GRACE", DEFAULT_RECONNECT_GRACE, min_value=0,
             ),
-            db_path=os.getenv("IGRILL_DB_PATH", DEFAULT_DB_PATH),
+            db_path=os.getenv("IGRILL_DB_PATH", DEFAULT_DB_PATH) or DEFAULT_DB_PATH,
             mac_prefix=os.getenv("IGRILL_MAC_PREFIX", DEFAULT_MAC_PREFIX),
             bind_address=os.getenv("IGRILL_BIND_ADDRESS", DEFAULT_BIND_ADDRESS),
             log_level=os.getenv("IGRILL_LOG_LEVEL", DEFAULT_LOG_LEVEL),

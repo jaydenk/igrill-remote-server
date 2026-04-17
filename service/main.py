@@ -102,6 +102,7 @@ async def run() -> None:
 
     setup_logging(config)
     _warn_cors_wildcard()
+    config.warn_if_misconfigured()
 
     app = create_app(config)
 

@@ -98,3 +98,47 @@ class TestSimulationRunner:
         assert by_index[1]["duration_secs"] is None
         assert by_index[2]["mode"] == "count_down"
         assert by_index[2]["duration_secs"] == 600
+
+
+@pytest.mark.asyncio
+async def test_reading_loop_stops_when_session_diverges(runner, history):
+    """If a real cook is started (or the simulator's session is otherwise
+    replaced) while the reading loop is running, the loop must stop
+    recording — otherwise synthetic temps poison the real cook's
+    history."""
+    await runner.start(speed=1000, probes=2)
+    sim_sid = runner._session_id
+    # Swap current_session_id to something else (emulates a real
+    # session_start landing while the sim loop is running).
+    await history.end_session(reason="test")
+    real = await history.start_session(
+        addresses=["AA:BB:CC:DD:EE:01"], reason="user",
+    )
+    real_sid = real["session_id"]
+
+    # Let the loop iterate a few more times so it observes the divergence.
+    await asyncio.sleep(0.05)
+
+    # Simulator task must have exited (either completed or about to).
+    assert runner._session_id == sim_sid, \
+        "runner._session_id changed unexpectedly"
+
+    # No probe_readings against the real session by the simulator address.
+    sim_readings_in_real = 0
+    async with history._conn.execute(
+        "SELECT COUNT(*) AS n FROM probe_readings "
+        "WHERE session_id = ? AND address = ?",
+        (real_sid, SIM_ADDRESS),
+    ) as cur:
+        row = await cur.fetchone()
+        sim_readings_in_real = row["n"]
+    assert sim_readings_in_real == 0, \
+        f"simulator leaked {sim_readings_in_real} readings into the real session"
+
+    # Clean up whatever task is still parked.
+    if runner._task and not runner._task.done():
+        runner._task.cancel()
+        try:
+            await runner._task
+        except (asyncio.CancelledError, Exception):
+            pass
