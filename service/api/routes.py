@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -15,6 +16,11 @@ from service.history.store import HistoryStore
 from service.models.device import DeviceStore
 
 LOG = logging.getLogger("igrill.http")
+
+
+# APNS device tokens are 64 hexadecimal characters. Live Activity tokens are
+# longer (typically 160 hex chars) — both are validated with this pattern.
+_PUSH_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32,200}$")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +81,9 @@ async def health_handler(request: web.Request) -> web.Response:
 
 async def sessions_handler(request: web.Request) -> web.Response:
     """GET /api/sessions — paginated session list."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
     history: HistoryStore = request.app["history"]
     try:
         limit = int(request.query.get("limit", "20"))
@@ -95,6 +104,9 @@ async def sessions_handler(request: web.Request) -> web.Response:
 
 async def session_detail_handler(request: web.Request) -> web.Response:
     """GET /api/sessions/{id} — session detail with readings."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
     history: HistoryStore = request.app["history"]
     session_id = request.match_info["id"]
     if not await history.session_exists(session_id):
@@ -132,6 +144,9 @@ async def export_handler(request: web.Request) -> web.Response:
     to download a CSV of the session's timers or notes respectively.
     JSON exports always include the full bundle (readings, timers, notes).
     """
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
     history: HistoryStore = request.app["history"]
     session_id = request.match_info["id"]
     if not await history.session_exists(session_id):
@@ -229,7 +244,24 @@ async def export_handler(request: web.Request) -> web.Response:
 
 
 async def push_token_handler(request: web.Request) -> web.Response:
-    """POST /api/v1/devices/push-token — register or update a push token."""
+    """POST /api/v1/devices/push-token — register or update a push token.
+
+    Auth, validation, and rate limiting were missing historically: any LAN
+    client could stuff the push token table with junk strings, and every
+    subsequent alert would then spend serial APNS round trips before
+    those tokens got evicted as bad. Gate on the shared session token,
+    validate the token string shape, and cap at 10 requests/minute/peer.
+    """
+    from service.api.websocket import is_authorized, _RateLimiter
+
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    limiter: "_RateLimiter" = request.app["push_token_limiter"]
+    peer = request.remote or "unknown"
+    if not limiter.allow(peer):
+        return web.json_response({"error": "rate limited"}, status=429)
+
     try:
         body = await request.json()
     except Exception:
@@ -238,8 +270,18 @@ async def push_token_handler(request: web.Request) -> web.Response:
     token = body.get("token")
     if not token or not isinstance(token, str):
         return web.json_response({"error": "token is required"}, status=400)
+    if not _PUSH_TOKEN_RE.match(token):
+        return web.json_response(
+            {"error": "token must be a hex string"}, status=400,
+        )
 
     la_token = body.get("liveActivityToken")
+    if la_token is not None:
+        if not isinstance(la_token, str) or not _PUSH_TOKEN_RE.match(la_token):
+            return web.json_response(
+                {"error": "liveActivityToken must be a hex string"}, status=400,
+            )
+
     push_service = request.app.get("push_service")
     if push_service:
         await push_service.upsert_token(token, live_activity_token=la_token)
@@ -428,7 +470,11 @@ async def simulate_probe_timer_handler(request: web.Request) -> web.Response:
 
 def setup_routes(app: web.Application) -> None:
     """Register all HTTP and WebSocket routes on *app*."""
-    from service.api.websocket import websocket_handler
+    from service.api.websocket import websocket_handler, _RateLimiter
+
+    # Per-app rate limiter for push-token registration. Lives on the app
+    # instance so test clients get isolated state.
+    app["push_token_limiter"] = _RateLimiter(max_requests=10, window_seconds=60)
 
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ws", websocket_handler)
