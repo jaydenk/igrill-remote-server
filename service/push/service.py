@@ -42,18 +42,26 @@ class PushService:
     When any of the required credentials (key_path, key_id, team_id,
     bundle_id) are missing the service marks itself as disabled and all
     public methods become silent no-ops.
+
+    Owns its own aiosqlite connection (opened in :meth:`connect`) so its
+    writes — push-token inserts, content-state reads — cannot interleave
+    inside a ``HistoryStore`` multi-statement transaction. Both
+    connections run in WAL mode with a 5s busy timeout, so the SQLite
+    writer lock is shared cooperatively without either side surfacing
+    ``SQLITE_BUSY`` in the happy path.
     """
 
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        db_path: str,
         key_path: str,
         key_id: str,
         team_id: str,
         bundle_id: str,
         use_sandbox: bool = True,
     ) -> None:
-        self._db = db
+        self._db_path = db_path
+        self._db: Optional[aiosqlite.Connection] = None
         self._key_path = key_path
         self._key_id = key_id
         self._team_id = team_id
@@ -83,11 +91,30 @@ class PushService:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Initialise the APNS client.
+        """Open the SQLite connection and initialise the APNS client.
 
-        Reads the private key from disk and creates an ``aioapns.APNs``
-        instance.  Does nothing if the service is disabled.
+        The SQLite connection is opened unconditionally (even when push is
+        disabled) so that ``upsert_token`` / ``remove_token`` still work
+        — iOS clients always register tokens, even on a server with no
+        APNS credentials, because a later configuration change should
+        pick them up without needing the client to re-register.
         """
+        await self._open_db()
+        await self._init_apns_client()
+
+    async def _open_db(self) -> None:
+        """Open the owned SQLite connection with WAL + busy_timeout PRAGMAs.
+
+        Separate from APNS init so tests can exercise token DB behaviour
+        without needing a real APNS key file on disk.
+        """
+        self._db = await aiosqlite.connect(self._db_path)
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
+
+    async def _init_apns_client(self) -> None:
         if not self._enabled:
             return
 
@@ -111,6 +138,22 @@ class PushService:
         except Exception:
             LOG.exception("Failed to initialise APNS client — push disabled")
             self._enabled = False
+
+    async def close(self) -> None:
+        """Close the APNS client and the SQLite connection."""
+        if self._client is not None:
+            try:
+                close = getattr(self._client, "close", None)
+                if close is not None:
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
+            except Exception:
+                LOG.exception("APNS client close failed")
+            self._client = None
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
 
     # ------------------------------------------------------------------
     # Token management

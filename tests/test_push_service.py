@@ -14,12 +14,21 @@ from service.push.service import PushService
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def db_path(tmp_path):
+    """Path to a temporary SQLite database file."""
+    return str(tmp_path / "test.db")
+
+
 @pytest_asyncio.fixture
-async def db(tmp_path):
-    """Create a temporary SQLite database with push_tokens and session tables."""
+async def db(db_path):
+    """Connection against ``db_path`` with the schema pre-populated.
+
+    Tests use this connection to set up fixtures and verify state.
+    PushService opens its own connection against the same path.
+    """
     import aiosqlite
 
-    db_path = str(tmp_path / "test.db")
     conn = await aiosqlite.connect(db_path)
     conn.row_factory = aiosqlite.Row
     await conn.executescript(
@@ -69,8 +78,15 @@ async def db(tmp_path):
     await conn.close()
 
 
-def _make_service(db, **kwargs):
-    """Create a PushService with sensible defaults."""
+async def _make_service(db_path, **kwargs):
+    """Create a PushService with sensible defaults and open its DB.
+
+    PushService now owns its own aiosqlite connection. We call ``_open_db``
+    directly rather than the full ``connect()`` so the unit tests can
+    pretend APNS credentials exist without needing a real key file on
+    disk — ``connect()`` reads the key and would flip ``_enabled`` off
+    when the fake path doesn't exist.
+    """
     defaults = {
         "key_path": "",
         "key_id": "",
@@ -79,13 +95,15 @@ def _make_service(db, **kwargs):
         "use_sandbox": True,
     }
     defaults.update(kwargs)
-    return PushService(db=db, **defaults)
+    svc = PushService(db_path=db_path, **defaults)
+    await svc._open_db()
+    return svc
 
 
-def _make_enabled_service(db):
+async def _make_enabled_service(db_path):
     """Create a PushService with all credentials set (but no real APNS)."""
-    return _make_service(
-        db,
+    return await _make_service(
+        db_path,
         key_path="/fake/key.p8",
         key_id="KEYID12345",
         team_id="TEAMID1234",
@@ -103,30 +121,30 @@ class TestPushServiceDisabled:
     """PushService should be a no-op when credentials are not configured."""
 
     @pytest.mark.asyncio
-    async def test_disabled_when_no_credentials(self, db):
-        svc = _make_service(db)
+    async def test_disabled_when_no_credentials(self, db, db_path):
+        svc = await _make_service(db_path)
         assert svc.enabled is False
 
     @pytest.mark.asyncio
-    async def test_disabled_when_partial_credentials(self, db):
-        svc = _make_service(db, key_path="/some/path", key_id="KEYID")
+    async def test_disabled_when_partial_credentials(self, db, db_path):
+        svc = await _make_service(db_path, key_path="/some/path", key_id="KEYID")
         assert svc.enabled is False
 
     @pytest.mark.asyncio
-    async def test_send_alert_is_noop_when_disabled(self, db):
-        svc = _make_service(db)
+    async def test_send_alert_is_noop_when_disabled(self, db, db_path):
+        svc = await _make_service(db_path)
         # Should not raise
         await svc.send_alert({"type": "target_reached", "payload": {}})
 
     @pytest.mark.asyncio
-    async def test_send_la_update_is_noop_when_disabled(self, db):
-        svc = _make_service(db)
+    async def test_send_la_update_is_noop_when_disabled(self, db, db_path):
+        svc = await _make_service(db_path)
         # Should not raise
         await svc.send_live_activity_update({"probes": []})
 
     @pytest.mark.asyncio
-    async def test_enabled_when_all_credentials(self, db):
-        svc = _make_enabled_service(db)
+    async def test_enabled_when_all_credentials(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         assert svc.enabled is True
 
 
@@ -137,8 +155,8 @@ class TestPushServiceDisabled:
 
 class TestTokenManagement:
     @pytest.mark.asyncio
-    async def test_upsert_token(self, db):
-        svc = _make_enabled_service(db)
+    async def test_upsert_token(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("device_token_abc")
 
         cursor = await db.execute(
@@ -151,8 +169,8 @@ class TestTokenManagement:
         assert row["live_activity_token"] is None
 
     @pytest.mark.asyncio
-    async def test_upsert_token_with_la_token(self, db):
-        svc = _make_enabled_service(db)
+    async def test_upsert_token_with_la_token(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("device_token_abc", live_activity_token="la_token_xyz")
 
         cursor = await db.execute(
@@ -163,8 +181,8 @@ class TestTokenManagement:
         assert row["live_activity_token"] == "la_token_xyz"
 
     @pytest.mark.asyncio
-    async def test_upsert_token_replaces_existing(self, db):
-        svc = _make_enabled_service(db)
+    async def test_upsert_token_replaces_existing(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("device_token_abc", live_activity_token="old_la")
         await svc.upsert_token("device_token_abc", live_activity_token="new_la")
 
@@ -183,8 +201,8 @@ class TestTokenManagement:
         assert row["live_activity_token"] == "new_la"
 
     @pytest.mark.asyncio
-    async def test_remove_token(self, db):
-        svc = _make_enabled_service(db)
+    async def test_remove_token(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("device_token_abc")
         await svc.remove_token("device_token_abc")
 
@@ -196,14 +214,14 @@ class TestTokenManagement:
         assert row["cnt"] == 0
 
     @pytest.mark.asyncio
-    async def test_remove_nonexistent_token(self, db):
-        svc = _make_enabled_service(db)
+    async def test_remove_nonexistent_token(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         # Should not raise
         await svc.remove_token("nonexistent")
 
     @pytest.mark.asyncio
-    async def test_get_all_tokens(self, db):
-        svc = _make_enabled_service(db)
+    async def test_get_all_tokens(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("token_a")
         await svc.upsert_token("token_b")
         await svc.upsert_token("token_c")
@@ -212,8 +230,8 @@ class TestTokenManagement:
         assert set(tokens) == {"token_a", "token_b", "token_c"}
 
     @pytest.mark.asyncio
-    async def test_get_la_tokens(self, db):
-        svc = _make_enabled_service(db)
+    async def test_get_la_tokens(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         await svc.upsert_token("token_a", live_activity_token="la_1")
         await svc.upsert_token("token_b")  # no LA token
         await svc.upsert_token("token_c", live_activity_token="la_2")
@@ -326,31 +344,36 @@ class TestFormatAlert:
 
 
 class TestLiveActivityThrottle:
-    def test_should_send_initially(self, db):
-        svc = _make_enabled_service(db)
+    @pytest.mark.asyncio
+    async def test_should_send_initially(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         assert svc.should_send_la_update() is True
 
-    def test_should_skip_if_too_soon(self, db):
-        svc = _make_enabled_service(db)
+    @pytest.mark.asyncio
+    async def test_should_skip_if_too_soon(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         # Simulate having just sent
         svc._last_la_update_ts = time.monotonic()
         assert svc.should_send_la_update() is False
 
-    def test_should_allow_after_interval(self, db):
-        svc = _make_enabled_service(db)
+    @pytest.mark.asyncio
+    async def test_should_allow_after_interval(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         # Simulate having sent 16 seconds ago
         svc._last_la_update_ts = time.monotonic() - 16
         assert svc.should_send_la_update() is True
 
-    def test_should_skip_at_exactly_interval(self, db):
-        svc = _make_enabled_service(db)
+    @pytest.mark.asyncio
+    async def test_should_skip_at_exactly_interval(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         # Simulate having sent exactly 15 seconds ago (boundary)
         svc._last_la_update_ts = time.monotonic() - 15
         # At exactly 15 seconds, should allow (>= check)
         assert svc.should_send_la_update() is True
 
-    def test_should_skip_just_under_interval(self, db):
-        svc = _make_enabled_service(db)
+    @pytest.mark.asyncio
+    async def test_should_skip_just_under_interval(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
         svc._last_la_update_ts = time.monotonic() - 14.9
         assert svc.should_send_la_update() is False
 
@@ -364,10 +387,10 @@ class TestBuildContentState:
     """_build_content_state emits the full iOS ContentState schema."""
 
     @pytest.mark.asyncio
-    async def test_no_session_id_returns_sensible_defaults(self, db):
+    async def test_no_session_id_returns_sensible_defaults(self, db, db_path):
         """A reading without a sessionId should not crash and should include
         all non-optional ProbeState fields with fallback values."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
         reading = {
             "payload": {
                 "sensorId": "AA:BB:CC:DD:EE:FF",
@@ -403,10 +426,10 @@ class TestBuildContentState:
         assert "temperature" not in p2
 
     @pytest.mark.asyncio
-    async def test_with_session_uses_db_label_and_target(self, db):
+    async def test_with_session_uses_db_label_and_target(self, db, db_path):
         """When a session exists in the DB the probe label and target_value are
         pulled from session_targets."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
 
         # Seed session and target rows.
         await db.execute(
@@ -441,9 +464,9 @@ class TestBuildContentState:
         assert p1["temperature"] == 75.0
 
     @pytest.mark.asyncio
-    async def test_range_mode_target_omitted(self, db):
+    async def test_range_mode_target_omitted(self, db, db_path):
         """For range-mode targets, target should not appear in the probe state."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
 
         await db.execute(
             "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
@@ -475,10 +498,10 @@ class TestBuildContentState:
         assert "target" not in p1
 
     @pytest.mark.asyncio
-    async def test_timer_included_when_present(self, db):
+    async def test_timer_included_when_present(self, db, db_path):
         """When a session_timers row exists the timer dict is included with
         camelCase field names matching the iOS ProbeTimerAnchors struct."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
 
         await db.execute(
             "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
@@ -520,9 +543,9 @@ class TestBuildContentState:
         assert timer["durationSecs"] is None
 
     @pytest.mark.asyncio
-    async def test_no_timer_when_no_db_row(self, db):
+    async def test_no_timer_when_no_db_row(self, db, db_path):
         """Probe with no timer row in the DB should not have a 'timer' key."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
 
         reading = {
             "payload": {
@@ -542,10 +565,10 @@ class TestBuildContentState:
         assert state["unit"] == "F"
 
     @pytest.mark.asyncio
-    async def test_battery_percent_not_in_output(self, db):
+    async def test_battery_percent_not_in_output(self, db, db_path):
         """batteryPercent must not appear in the content state — the iOS
         ContentState struct has no such field."""
-        svc = _make_enabled_service(db)
+        svc = await _make_enabled_service(db_path)
 
         reading = {
             "payload": {
@@ -561,3 +584,43 @@ class TestBuildContentState:
 
         state = await svc._build_content_state(reading)
         assert "batteryPercent" not in state
+
+
+# ---------------------------------------------------------------------------
+# Connection ownership (B1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_service_owns_its_own_connection(db_path, db):
+    """PushService must open its own aiosqlite connection against db_path
+    rather than sharing one passed in from a caller. Closing the service
+    must not affect any separate connection the test still holds."""
+    svc = PushService(
+        db_path=db_path,
+        key_path="", key_id="", team_id="", bundle_id="", use_sandbox=True,
+    )
+    await svc.connect()
+
+    # The service's connection is distinct from the fixture's.
+    assert svc._db is not None
+    assert svc._db is not db
+
+    # Round-trip a write through the service's connection, read back via
+    # the independent fixture connection — proves they share the SQLite
+    # file under WAL without interference.
+    await svc.upsert_token("a" * 64)
+    cursor = await db.execute(
+        "SELECT token FROM push_tokens WHERE token = ?", ("a" * 64,),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["token"] == "a" * 64
+
+    await svc.close()
+    assert svc._db is None
+
+    # Fixture connection is still usable after svc.close().
+    cursor = await db.execute("SELECT COUNT(*) AS n FROM push_tokens")
+    row = await cursor.fetchone()
+    assert row["n"] == 1

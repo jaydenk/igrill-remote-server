@@ -80,6 +80,10 @@ def create_app(config: Config) -> web.Application:
 
     app["hub"] = hub
     app["start_time"] = time.monotonic()
+    # Registry of fire-and-forget background tasks (push sends, LA updates,
+    # etc.) so shutdown can drain them before closing the store layers they
+    # write to. Populated by handlers via ``app["bg_tasks"].add(task)``.
+    app["bg_tasks"] = set()
 
     setup_routes(app)
     setup_dashboard(app)
@@ -106,9 +110,13 @@ async def run() -> None:
     await history.connect()
     await history.recover_orphaned_sessions()
 
-    # Create and connect the push service (shares the history DB connection)
+    # Create and connect the push service — owns its own SQLite connection
+    # pointing at the same DB file as HistoryStore. WAL + busy_timeout (set
+    # on both connections) prevents SQLITE_BUSY on the rare race; running
+    # under the same asyncio.Lock as HistoryStore would require threading
+    # push writes through the store, which couples layers unnecessarily.
     push_service = PushService(
-        db=history._conn,
+        db_path=config.db_path,
         key_path=config.apns_key_path,
         key_id=config.apns_key_id,
         team_id=config.apns_team_id,
@@ -137,10 +145,10 @@ async def run() -> None:
         max_backoff=config.max_backoff,
     )
 
-    tasks = [
+    scan_task = asyncio.create_task(manager.scan_loop())
+    long_running_tasks = [
         asyncio.create_task(broadcast_readings(app)),
         asyncio.create_task(broadcast_events(app)),
-        asyncio.create_task(manager.scan_loop()),
         asyncio.create_task(countdown_completer_loop(app)),
     ]
 
@@ -152,15 +160,41 @@ async def run() -> None:
     await stop.wait()
     LOG.info("Shutting down...")
 
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # 1. Stop accepting new HTTP/WS requests. runner.cleanup() also closes
+    #    any in-flight WebSocket connections so their handlers unwind before
+    #    we tear down the stores they depend on.
+    await runner.cleanup()
+
+    # 2. Stop the BLE scan loop before the device manager, so a mid-shutdown
+    #    scan can't spawn a fresh worker while we're cancelling workers.
+    scan_task.cancel()
+    try:
+        await scan_task
+    except asyncio.CancelledError:
+        pass
+
+    # 3. Stop per-device workers.
     await manager.stop()
 
+    # 4. Cancel the long-running broadcast/countdown tasks and drain.
+    for t in long_running_tasks:
+        t.cancel()
+    await asyncio.gather(*long_running_tasks, return_exceptions=True)
+
+    # 5. Drain any background tasks that handlers scheduled via
+    #    app["bg_tasks"] before closing the stores they write to.
+    bg_tasks = app.get("bg_tasks") or set()
+    if bg_tasks:
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
+
+    # 6. Remove any lingering WebSocket clients from the hub registry.
     for client in list(app["hub"].clients):
         await app["hub"].remove(client)
 
-    await runner.cleanup()
+    # 7. Close the push service (owns its own DB connection) before the
+    #    history store's DB — a stray in-flight push write would otherwise
+    #    hit a closed DB path.
+    await push_service.close()
     await history.close()
 
 
