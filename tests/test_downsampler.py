@@ -99,3 +99,66 @@ async def test_downsample_none_temperatures(store, sample_address):
     readings = await store.get_session_readings(sid)
     assert len(readings) == 1
     assert readings[0]["temperature"] is None
+
+
+@pytest.mark.asyncio
+async def test_downsample_averages_battery_and_propane(store, sample_address):
+    """The surviving device_readings row for a collapsed bucket must
+    carry the AVERAGE of battery / propane across the bucket — not the
+    earliest sample's snapshot. Previously the downsampler kept the
+    first sample's device_readings row by virtue of the orphan-cleanup
+    deleting the rest, which produced non-monotonic battery jumps in
+    the joined view."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    old_time = datetime.now(timezone.utc) - timedelta(days=2)
+    bucket_start = old_time.replace(second=0, microsecond=0)
+    batteries = [100, 80, 60]
+    propanes = [40.0, 30.0, 20.0]
+    for i, (batt, prop) in enumerate(zip(batteries, propanes)):
+        ts = (bucket_start + timedelta(seconds=i * 10)).isoformat()
+        await store.record_reading(
+            session_id=sid, address=sample_address, seq=i + 1,
+            probes=[{"index": 1, "temperature": 70.0 + i * 10}],
+            battery=batt, propane=prop, heating=None, recorded_at=ts,
+        )
+
+    from service.history.downsampler import downsample_session
+    await downsample_session(store, sid)
+
+    readings = await store.get_session_readings(sid)
+    assert len(readings) == 1
+    # 100/80/60 → 80; 40/30/20 → 30.
+    assert readings[0]["battery"] == pytest.approx(80, abs=1)
+    assert readings[0]["propane"] == pytest.approx(30, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_downsample_preserves_device_readings_when_full_temp_missing(
+    store, sample_address,
+):
+    """If the bucket's earliest sample had no battery_pct (None) but a
+    later sample did, the downsampled row must carry the average of the
+    non-null values rather than dropping to NULL."""
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    old_time = datetime.now(timezone.utc) - timedelta(days=2)
+    bucket_start = old_time.replace(second=0, microsecond=0)
+    batteries = [None, 80, 60]
+    for i, batt in enumerate(batteries):
+        ts = (bucket_start + timedelta(seconds=i * 10)).isoformat()
+        await store.record_reading(
+            session_id=sid, address=sample_address, seq=i + 1,
+            probes=[{"index": 1, "temperature": 70.0 + i * 10}],
+            battery=batt, propane=None, heating=None, recorded_at=ts,
+        )
+
+    from service.history.downsampler import downsample_session
+    await downsample_session(store, sid)
+
+    readings = await store.get_session_readings(sid)
+    assert len(readings) == 1
+    # avg(80, 60) → 70.
+    assert readings[0]["battery"] == pytest.approx(70, abs=1)

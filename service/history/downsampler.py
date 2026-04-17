@@ -113,7 +113,11 @@ async def downsample_range(
 
     deleted_count = 0
     inserted_count = 0
-    touched_addresses: set[tuple[str, str]] = set()
+    # Track every (sid, address, seq) we collapse so we can rewrite the
+    # corresponding device_readings rows in one pass at the end (rather
+    # than the prior orphan-cleanup approach, which kept the bucket's
+    # earliest snapshot and made battery/propane non-monotonic).
+    bucket_seqs: dict[tuple[str, str, int], list[int]] = {}
 
     try:
         await conn.execute("BEGIN")
@@ -130,7 +134,6 @@ async def downsample_range(
             mid_ts_iso = mid_ts.isoformat()
             min_seq = min(r["seq"] for r in readings)
             sid = readings[0]["session_id"]
-            touched_addresses.add((sid, address))
 
             ids = [r["id"] for r in readings]
             placeholders = ",".join("?" for _ in ids)
@@ -147,17 +150,59 @@ async def downsample_range(
             )
             inserted_count += 1
 
-        for sid_val, addr_val in touched_addresses:
+            bucket_key_id = (sid, address, min_seq)
+            seqs = sorted({r["seq"] for r in readings})
+            existing = bucket_seqs.get(bucket_key_id)
+            if existing is None:
+                bucket_seqs[bucket_key_id] = seqs
+            else:
+                # Multiple probe groups on the same address landed in this
+                # exact bucket window — they all collapse into the same
+                # min_seq, so union their source seqs.
+                bucket_seqs[bucket_key_id] = sorted(set(existing) | set(seqs))
+
+        # For each collapsed bucket, replace the corresponding
+        # device_readings rows with a single averaged row keyed by min_seq.
+        # Battery/propane are averaged across the bucket's source rows;
+        # heating_json (a JSON blob — typically the latest pulse element
+        # snapshot) is taken from the row with the highest seq.
+        for (sid_val, addr_val, min_seq), seqs in bucket_seqs.items():
+            seq_placeholders = ",".join("?" for _ in seqs)
+            cursor = await conn.execute(
+                f"SELECT recorded_at, seq, battery, propane, heating_json "
+                f"FROM device_readings "
+                f"WHERE session_id = ? AND address = ? AND seq IN ({seq_placeholders}) "
+                f"ORDER BY seq ASC",
+                [sid_val, addr_val, *seqs],
+            )
+            dr_rows = await cursor.fetchall()
+            if not dr_rows:
+                continue
+
+            batt_vals = [r["battery"] for r in dr_rows if r["battery"] is not None]
+            prop_vals = [r["propane"] for r in dr_rows if r["propane"] is not None]
+            avg_batt = round(sum(batt_vals) / len(batt_vals)) if batt_vals else None
+            avg_prop = sum(prop_vals) / len(prop_vals) if prop_vals else None
+            # Latest heating snapshot wins (highest seq → most recent).
+            latest_heating = dr_rows[-1]["heating_json"]
+            # Pick the timestamp of the canonical (min_seq) row when present,
+            # else fall back to the earliest available row in the bucket.
+            min_seq_row = next(
+                (r for r in dr_rows if r["seq"] == min_seq), dr_rows[0],
+            )
+            recorded_at = min_seq_row["recorded_at"]
+
             await conn.execute(
-                "DELETE FROM device_readings "
-                "WHERE session_id = ? AND address = ? "
-                "AND NOT EXISTS ("
-                "  SELECT 1 FROM probe_readings "
-                "  WHERE probe_readings.session_id = device_readings.session_id "
-                "  AND probe_readings.address = device_readings.address "
-                "  AND probe_readings.seq = device_readings.seq"
-                ")",
-                (sid_val, addr_val),
+                f"DELETE FROM device_readings "
+                f"WHERE session_id = ? AND address = ? AND seq IN ({seq_placeholders})",
+                [sid_val, addr_val, *seqs],
+            )
+            await conn.execute(
+                "INSERT INTO device_readings "
+                "(session_id, address, recorded_at, seq, battery, propane, heating_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (sid_val, addr_val, recorded_at, min_seq,
+                 avg_batt, avg_prop, latest_heating),
             )
 
         await conn.commit()

@@ -124,7 +124,19 @@ class DeviceManager:
 
             for address in dead_workers:
                 LOG.info("worker_respawn address=%s", address)
-                old_worker = self._workers[address]
+                old_worker = self._workers.pop(address)
+                old_task = self._tasks.pop(address)
+                # Drain the dead task. ``done()`` has already returned True so
+                # this returns immediately; the await is here to surface any
+                # exception that happened during final teardown (rather than
+                # leaving an unhandled-exception warning to be GC-logged).
+                try:
+                    await old_task
+                except Exception:
+                    LOG.debug(
+                        "worker_respawn drained exception for %s",
+                        address, exc_info=True,
+                    )
                 await self.store.upsert(address, connected=False, error="worker_crashed")
                 worker = DeviceWorker(
                     address,
