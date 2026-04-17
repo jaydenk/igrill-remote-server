@@ -484,6 +484,12 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         ctx.evaluator.set_targets(new_session_id, targets)
 
     if session_info.get("end_event"):
+        # start_session auto-ended the previous session. Clear the evaluator's
+        # in-memory state for the old session_id so its ProbeAlertStates and
+        # TargetConfigs don't accumulate forever across many cooks.
+        prior_sid = session_info["end_event"].get("sessionId")
+        if prior_sid:
+            ctx.evaluator.clear_session(prior_sid)
         await ctx.store.publish_event(make_envelope("session_end", session_info["end_event"]))
 
     start_event = dict(session_info["start_event"])
@@ -607,7 +613,10 @@ async def _handle_probe_timer(ctx: _MessageContext) -> None:
             request_id=ctx.request_id,
         )
         return
-    if not isinstance(probe_index, int):
+    # isinstance(x, int) returns True for bool too — a client sending
+    # "probe_index": true would otherwise persist as probe 1 and collide
+    # with a real probe-1 timer row.
+    if not isinstance(probe_index, int) or isinstance(probe_index, bool):
         await send_error(
             ctx.ws, "invalid_payload", "probe_index must be an integer.",
             request_id=ctx.request_id,

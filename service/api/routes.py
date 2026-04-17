@@ -418,7 +418,9 @@ async def simulate_probe_timer_handler(request: web.Request) -> web.Response:
 
     probe_index = body.get("probe_index")
     action = body.get("action")
-    if not isinstance(probe_index, int):
+    # isinstance(x, int) returns True for bool too — reject explicitly so
+    # "probe_index": true doesn't persist as probe 1.
+    if not isinstance(probe_index, int) or isinstance(probe_index, bool):
         return web.json_response(
             {"error": "probe_index must be an integer"}, status=400,
         )

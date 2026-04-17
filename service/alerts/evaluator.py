@@ -32,10 +32,30 @@ class AlertEvaluator:
         self._targets: dict[str, list[TargetConfig]] = {}  # session_id -> targets
 
     def set_targets(self, session_id: str, targets: list[TargetConfig]) -> None:
-        """Register (or replace) the target configs for *session_id*."""
+        """Register (or replace) the target configs for *session_id*.
+
+        Preserves ``ProbeAlertState`` for probe indices that were already
+        being tracked — a user tweaking an in-flight target (e.g. raising
+        it above the current temperature) must NOT re-fire the
+        approaching/reached/exceeded one-shots that already dispatched
+        for that probe. Only probe indices that weren't tracked before
+        receive a fresh state.
+        """
         self._targets[session_id] = targets
+        incoming = {t.probe_index for t in targets}
+        # Drop state for probes no longer in the target set — they're
+        # not being evaluated any more, so their state is dead weight.
+        stale = [
+            key for key in self._state
+            if key[0] == session_id and key[1] not in incoming
+        ]
+        for key in stale:
+            del self._state[key]
+        # Preserve existing state; only create fresh state for new probes.
         for t in targets:
-            self._state[(session_id, t.probe_index)] = ProbeAlertState()
+            key = (session_id, t.probe_index)
+            if key not in self._state:
+                self._state[key] = ProbeAlertState()
 
     def clear_session(self, session_id: str) -> None:
         """Remove all targets and state for *session_id*."""
@@ -99,7 +119,13 @@ class AlertEvaluator:
                 threshold = effective_target - target.pre_alert_offset
                 approaching = temp >= threshold and not reached
             else:  # range
-                low = target.effective_low() or 0
+                low = target.effective_low()
+                if low is None:
+                    # Without a low bound a range target is unevaluable:
+                    # the old `or 0` fallback silently collapsed the rule
+                    # to "≤ high", firing target_reached at session start
+                    # for every plausible temperature.
+                    continue
                 reached = low <= temp <= effective_target
                 exceeded = temp > effective_target
                 approaching = temp >= (low - target.pre_alert_offset) and temp < low

@@ -1113,3 +1113,84 @@ async def test_ws_session_start_rejects_non_integer_target_duration_secs(client)
             msg = await ws.receive_json()
         assert msg.get("type") == "error"
         assert msg["payload"]["code"] == "invalid_payload"
+
+
+@pytest.mark.asyncio
+async def test_ws_auto_end_clears_evaluator_state(client):
+    """Starting a second session while a first is active auto-ends the
+    first. The evaluator's in-memory state for the previous session id
+    must be cleared; otherwise TargetConfigs and ProbeAlertStates
+    accumulate forever across cooks."""
+    await _seed_device(client)
+    evaluator = client.app["evaluator"]
+
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "name": "First",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 70},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        first_sid = msg["payload"]["sessionId"]
+        assert first_sid in evaluator._targets
+
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r2",
+            "payload": {
+                "name": "Second",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 85},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        second_sid = msg["payload"]["sessionId"]
+
+    assert first_sid not in evaluator._targets, \
+        "evaluator still holds targets for auto-ended session"
+    assert all(key[0] != first_sid for key in evaluator._state), \
+        "evaluator still holds ProbeAlertState for auto-ended session"
+    assert second_sid in evaluator._targets
+
+
+@pytest.mark.asyncio
+async def test_ws_probe_timer_rejects_bool_probe_index(client):
+    """`probe_index: true` must not pass isinstance(x, int) validation —
+    bools are ints in Python, so without an explicit reject this would
+    persist as probe 1."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [{"probe_index": 1, "mode": "fixed", "target_value": 70}],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+
+        await ws.send_json({
+            "v": 2, "type": "probe_timer_request", "requestId": "t1",
+            "payload": {
+                "address": _TEST_DEVICE,
+                "probe_index": True,
+                "action": "start",
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "probe_timer_ack"):
+            msg = await ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["payload"]["code"] == "invalid_payload"
