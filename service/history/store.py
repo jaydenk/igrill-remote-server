@@ -41,11 +41,22 @@ def now_iso_utc() -> str:
 
 
 def parse_iso(timestamp: str) -> Optional[datetime]:
-    """Parse an ISO-8601 timestamp, returning *None* on failure."""
+    """Parse an ISO-8601 timestamp, returning *None* on failure.
+
+    Naive strings (no timezone designator) are coerced to UTC. Every
+    timestamp the store writes goes out via ``now_iso_utc`` which is
+    timezone-aware, but rows written by old migrations, external tools,
+    or tests can still be naive — subtracting an aware from a naive
+    ``datetime`` raises ``TypeError`` and would otherwise surface from
+    ``end_session`` or the countdown completer loop.
+    """
     try:
-        return datetime.fromisoformat(timestamp)
+        dt = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +96,13 @@ class HistoryStore:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # 5s busy timeout: defends against the odd SQLITE_BUSY spike when a
+        # separate connection (e.g. push_service or a backup process) holds a
+        # write lock at the exact moment we try to begin a transaction. WAL
+        # handles most concurrent-reader cases already, but writers still
+        # serialise, so a short timeout is the simplest way to keep the event
+        # loop fluent instead of instantly surfacing an error.
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         await init_db(self._conn)
         await run_migrations(self._conn)
 
@@ -1222,13 +1240,34 @@ class HistoryStore:
 
             expired: list[dict] = []
             for row in rows:
-                started_dt = parse_iso(row["started_at"])
-                if started_dt is None:
+                # Defence in depth: a single corrupt row (non-numeric
+                # accumulated_secs, bogus timestamp that parse_iso tolerates
+                # but arithmetic rejects, etc.) must not abort the iteration
+                # and leave every other expired timer unfired for this tick.
+                try:
+                    started_dt = parse_iso(row["started_at"])
+                    if started_dt is None:
+                        continue
+                    elapsed = max(0, int((now_dt - started_dt).total_seconds()))
+                    accumulated = row["accumulated_secs"]
+                    if accumulated is None:
+                        accumulated = 0
+                    elif not isinstance(accumulated, (int, float)):
+                        # Malformed row — skip rather than treat as zero,
+                        # which would spuriously expire an otherwise-fresh
+                        # timer. Caller also logs.
+                        raise TypeError(
+                            f"accumulated_secs is not numeric: {accumulated!r}"
+                        )
+                    effective = accumulated + elapsed
+                    if effective >= row["duration_secs"]:
+                        expired.append(self._timer_row_to_dict(row))
+                except (TypeError, ValueError):
+                    LOG.exception(
+                        "Skipping corrupt session_timers row: %s",
+                        dict(row),
+                    )
                     continue
-                elapsed = max(0, int((now_dt - started_dt).total_seconds()))
-                effective = (row["accumulated_secs"] or 0) + elapsed
-                if effective >= row["duration_secs"]:
-                    expired.append(self._timer_row_to_dict(row))
             return expired
 
     # ------------------------------------------------------------------

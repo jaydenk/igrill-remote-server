@@ -1505,3 +1505,79 @@ async def test_list_sessions_includes_target_duration_secs(store, sample_address
     sessions = await store.list_sessions(limit=10)
     assert len(sessions) == 1
     assert sessions[0]["targetDurationSecs"] == 7200
+
+
+@pytest.mark.asyncio
+async def test_connect_sets_wal_and_busy_timeout_pragmas(store):
+    """HistoryStore.connect must set journal_mode=WAL and busy_timeout so
+    that concurrent writers don't immediately fail with SQLITE_BUSY."""
+    async with store._conn.execute("PRAGMA journal_mode") as cur:
+        row = await cur.fetchone()
+    assert row[0].lower() == "wal"
+
+    async with store._conn.execute("PRAGMA busy_timeout") as cur:
+        row = await cur.fetchone()
+    assert row[0] >= 5000
+
+
+def test_parse_iso_coerces_naive_to_utc_aware():
+    """Naive ISO strings must be read as UTC so datetime arithmetic
+    against now_iso_utc (aware) does not raise TypeError."""
+    from service.history.store import parse_iso, now_iso_utc
+    from datetime import timezone
+
+    naive = parse_iso("2026-04-17T10:00:00")
+    assert naive is not None
+    assert naive.tzinfo is not None
+    assert naive.utcoffset() == timezone.utc.utcoffset(None)
+
+    aware = parse_iso(now_iso_utc())
+    assert aware is not None
+    assert aware.tzinfo is not None
+
+    # Subtracting the two must not raise.
+    _ = aware - naive
+
+
+@pytest.mark.asyncio
+async def test_find_expired_running_countdowns_skips_corrupt_rows(
+    store, sample_address,
+):
+    """One row with a garbage numeric column must not abort the iteration
+    — other expired timers in the same tick must still be returned."""
+    from service.history.store import now_iso_utc
+    from datetime import datetime, timedelta, timezone
+
+    start = await store.start_session(addresses=[sample_address], reason="user")
+    sid = start["session_id"]
+
+    # Healthy row: 60-second count_down started 120s ago → expired.
+    await store.upsert_timer(
+        session_id=sid, address=sample_address, probe_index=1,
+        mode="count_down", duration_secs=60,
+    )
+    started = (
+        datetime.now(timezone.utc) - timedelta(seconds=120)
+    ).isoformat()
+    await store._conn.execute(
+        "UPDATE session_timers SET started_at = ? "
+        "WHERE session_id = ? AND address = ? AND probe_index = ?",
+        (started, sid, sample_address, 1),
+    )
+    # Corrupt row: accumulated_secs is a non-numeric string (SQLite's loose
+    # typing allows this). This row should be skipped without aborting.
+    await store.upsert_timer(
+        session_id=sid, address=sample_address, probe_index=2,
+        mode="count_down", duration_secs=60,
+    )
+    await store._conn.execute(
+        "UPDATE session_timers SET started_at = ?, accumulated_secs = 'not-an-int' "
+        "WHERE session_id = ? AND address = ? AND probe_index = ?",
+        (started, sid, sample_address, 2),
+    )
+    await store._conn.commit()
+
+    expired = await store.find_expired_running_countdowns()
+    probes = sorted(e["probe_index"] for e in expired)
+    assert probes == [1], \
+        f"healthy countdown lost because a sibling row had corrupt state: {expired}"
