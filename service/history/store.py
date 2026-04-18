@@ -812,8 +812,8 @@ class HistoryStore:
                 await self._conn.execute(
                     "INSERT OR REPLACE INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
-                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label, unit) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         address,
@@ -825,6 +825,7 @@ class HistoryStore:
                         t.pre_alert_offset,
                         t.reminder_interval_secs,
                         t.label,
+                        t.unit,
                     ),
                 )
             await self._conn.commit()
@@ -834,7 +835,7 @@ class HistoryStore:
         async with self._lock:
             cursor = await self._conn.execute(
                 "SELECT probe_index, mode, target_value, range_low, range_high, "
-                "pre_alert_offset, reminder_interval_secs, label "
+                "pre_alert_offset, reminder_interval_secs, label, unit "
                 "FROM session_targets WHERE session_id = ?",
                 (session_id,),
             )
@@ -849,6 +850,7 @@ class HistoryStore:
                 pre_alert_offset=r["pre_alert_offset"] if r["pre_alert_offset"] is not None else 5.0,
                 reminder_interval_secs=r["reminder_interval_secs"] if r["reminder_interval_secs"] is not None else 0,
                 label=r["label"],
+                unit=r["unit"] if r["unit"] else "C",
             )
             for r in rows
         ]
@@ -866,8 +868,8 @@ class HistoryStore:
                 await self._conn.execute(
                     "INSERT INTO session_targets "
                     "(session_id, address, probe_index, mode, target_value, "
-                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "range_low, range_high, pre_alert_offset, reminder_interval_secs, label, unit) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         address,
@@ -879,6 +881,7 @@ class HistoryStore:
                         t.pre_alert_offset,
                         t.reminder_interval_secs,
                         t.label,
+                        t.unit,
                     ),
                 )
             await self._conn.commit()

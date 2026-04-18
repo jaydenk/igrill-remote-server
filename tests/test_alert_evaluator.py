@@ -281,3 +281,91 @@ def test_range_target_with_none_low_does_not_fire_reached():
     )
     assert events == [], \
         f"range target with None low should emit no events, got {events}"
+
+
+# ---------------------------------------------------------------------------
+# D3: target stored in Fahrenheit, readings in Celsius
+# ---------------------------------------------------------------------------
+
+
+def test_fahrenheit_target_approaching_at_c_equivalent():
+    """Target = 165F (= 73.89C), reading = 70C is within 5F (~2.78C) of target
+    after converting the offset, so it should fire target_approaching but NOT
+    target_reached.
+
+    Without D3's conversion, the evaluator would compare 70 >= 165-5=160 → False
+    (no approaching) and 70 >= 165 → False (no reached), silently never firing.
+    """
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=165.0,
+        pre_alert_offset=5.0, unit="F",
+    )
+    ev.set_targets("s1", [target])
+    events = ev.evaluate("s1", [_make_probe(1, 72.0)], "sensor1")
+    # 165F = 73.89C, offset 5F = 2.78C, threshold = 71.11C → 72 >= 71.11 and < 73.89
+    assert len(events) == 1
+    assert events[0]["type"] == "target_approaching"
+
+
+def test_fahrenheit_target_reached_at_c_equivalent():
+    """Target = 165F (= 73.89C). A C reading exactly at the converted target
+    must fire target_reached (but not yet target_exceeded — temp is not
+    strictly above)."""
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=165.0,
+        pre_alert_offset=5.0, unit="F",
+    )
+    ev.set_targets("s1", [target])
+    # Walk it through the stages so reached doesn't fire before approaching.
+    ev.evaluate("s1", [_make_probe(1, 72.0)], "sensor1")  # approaching
+    c_at_target = (165.0 - 32.0) * 5.0 / 9.0  # = 73.888..
+    events = ev.evaluate("s1", [_make_probe(1, c_at_target)], "sensor1")
+    types = {e["type"] for e in events}
+    assert "target_reached" in types
+    assert "target_exceeded" not in types, (
+        "At exactly the target C equivalent, exceeded (temp > target) must be False"
+    )
+
+
+def test_fahrenheit_target_not_reached_below_c_equivalent():
+    """Target = 165F (=73.89C), reading at 73.8C (=164.84F) must NOT fire reached."""
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=165.0,
+        pre_alert_offset=5.0, unit="F",
+    )
+    ev.set_targets("s1", [target])
+    events = ev.evaluate("s1", [_make_probe(1, 73.8)], "sensor1")
+    types = {e["type"] for e in events}
+    assert "target_reached" not in types
+    assert "target_approaching" in types  # 73.8 is within the 5F offset band
+
+
+def test_fahrenheit_range_target_evaluation():
+    """Range target in Fahrenheit [225, 250] = [107.22C, 121.11C] — a C reading
+    of 110 should sit inside the range and fire target_reached."""
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="range",
+        range_low=225.0, range_high=250.0,
+        pre_alert_offset=5.0, unit="F",
+    )
+    ev.set_targets("s1", [target])
+    ev.evaluate("s1", [_make_probe(1, 100.0)], "sensor1")  # approaching
+    events = ev.evaluate("s1", [_make_probe(1, 110.0)], "sensor1")
+    assert any(e["type"] == "target_reached" for e in events)
+
+
+def test_celsius_target_unchanged_by_conversion():
+    """Default unit='C' path must remain identical to pre-D3 behaviour."""
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=90.0,
+        pre_alert_offset=5.0,  # unit defaults to 'C'
+    )
+    ev.set_targets("s1", [target])
+    events = ev.evaluate("s1", [_make_probe(1, 87.0)], "sensor1")
+    assert len(events) == 1
+    assert events[0]["type"] == "target_approaching"

@@ -10,6 +10,18 @@ from service.models.session import TargetConfig
 LOG = logging.getLogger("igrill.alert")
 
 
+def _target_to_celsius(value: float, unit: str) -> float:
+    """Convert a target temperature *value* expressed in *unit* to Celsius.
+    BLE readings are always Celsius; targets may be stored in either unit."""
+    return (value - 32.0) * 5.0 / 9.0 if unit == "F" else value
+
+
+def _offset_to_celsius(offset: float, unit: str) -> float:
+    """Convert a temperature *delta* (not an absolute temperature) to Celsius.
+    The 32°F baseline cancels for a delta, so it's just the scaling factor."""
+    return offset * 5.0 / 9.0 if unit == "F" else offset
+
+
 @dataclass
 class ProbeAlertState:
     """Tracks which alert stages have already been dispatched for a probe."""
@@ -99,9 +111,15 @@ class AlertEvaluator:
             key = (session_id, target.probe_index)
             state = self._state.setdefault(key, ProbeAlertState())
 
-            effective_target: Optional[float] = target.effective_target()
-            if effective_target is None:
+            raw_effective_target: Optional[float] = target.effective_target()
+            if raw_effective_target is None:
                 continue
+
+            # BLE readings are Celsius; convert stored target values into the
+            # same unit before comparison. The offset is a delta, so it uses a
+            # simpler scaling conversion with no 32° shift.
+            effective_target_c = _target_to_celsius(raw_effective_target, target.unit)
+            offset_c = _offset_to_celsius(target.pre_alert_offset, target.unit)
 
             base_payload = {
                 "sensorId": sensor_id,
@@ -114,24 +132,25 @@ class AlertEvaluator:
             approaching_high = False
 
             if target.mode == "fixed":
-                reached = temp >= effective_target
-                exceeded = temp > effective_target
-                threshold = effective_target - target.pre_alert_offset
+                reached = temp >= effective_target_c
+                exceeded = temp > effective_target_c
+                threshold = effective_target_c - offset_c
                 approaching = temp >= threshold and not reached
             else:  # range
-                low = target.effective_low()
-                if low is None:
+                raw_low = target.effective_low()
+                if raw_low is None:
                     # Without a low bound a range target is unevaluable:
                     # the old `or 0` fallback silently collapsed the rule
                     # to "≤ high", firing target_reached at session start
                     # for every plausible temperature.
                     continue
-                reached = low <= temp <= effective_target
-                exceeded = temp > effective_target
-                approaching = temp >= (low - target.pre_alert_offset) and temp < low
+                low_c = _target_to_celsius(raw_low, target.unit)
+                reached = low_c <= temp <= effective_target_c
+                exceeded = temp > effective_target_c
+                approaching = temp >= (low_c - offset_c) and temp < low_c
                 approaching_high = (
-                    temp > (effective_target - target.pre_alert_offset)
-                    and temp <= effective_target
+                    temp > (effective_target_c - offset_c)
+                    and temp <= effective_target_c
                     and not exceeded
                 )
 

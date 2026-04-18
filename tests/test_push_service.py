@@ -57,6 +57,7 @@ async def db(db_path):
             range_low    REAL,
             range_high   REAL,
             label        TEXT,
+            unit         TEXT NOT NULL DEFAULT 'C',
             PRIMARY KEY (session_id, address, probe_index)
         );
 
@@ -337,6 +338,41 @@ class TestFormatAlert:
         assert title == "Alert"
         assert "Probe 1" in body
 
+    def test_fahrenheit_target_shown_in_c_in_body(self):
+        """When the stored target is F but the reading is C, the body must
+        show the target converted to C so both numbers share a scale. Without
+        conversion a body like 'is at 70° (target: 165°)' would be nonsense."""
+        title, body = PushService.format_alert(
+            "target_approaching",
+            {
+                "probeIndex": 1,
+                "currentTemp": 72.0,
+                "target": {"target_value": 165.0, "label": "Chicken", "unit": "F"},
+            },
+        )
+        # 165F → 73.89C, rounded to 74 at .0f precision
+        assert "72" in body
+        assert "74" in body
+        assert "165" not in body, "raw F value must not leak into a C-scale body"
+
+    def test_fahrenheit_range_shown_in_c_in_body(self):
+        title, body = PushService.format_alert(
+            "target_reached",
+            {
+                "probeIndex": 1,
+                "currentTemp": 110.0,
+                "target": {
+                    "range_low": 225.0, "range_high": 250.0,
+                    "label": "BBQ", "unit": "F",
+                },
+            },
+        )
+        # 225F=107.22C, 250F=121.11C → rounded to 107 and 121.
+        assert "107" in body
+        assert "121" in body
+        assert "225" not in body
+        assert "250" not in body
+
 
 # ---------------------------------------------------------------------------
 # Live Activity throttle
@@ -584,6 +620,180 @@ class TestBuildContentState:
 
         state = await svc._build_content_state(reading)
         assert "batteryPercent" not in state
+
+    @pytest.mark.asyncio
+    async def test_fahrenheit_target_converted_to_celsius(self, db, db_path):
+        """Target stored in F must be emitted in the content state as C — iOS
+        will convert back to the user's display unit. Top-level unit stays C."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-f", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-f", "AA:BB:CC:DD:EE:FF", 1, "fixed", 165.0, "Chicken", "F"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-f",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 70.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        p1 = state["probes"][0]
+        expected_c = (165.0 - 32.0) * 5.0 / 9.0
+        assert p1["target"] == pytest.approx(expected_c, abs=0.01)
+        assert state["unit"] == "C", "top-level unit stays canonical C"
+
+    @pytest.mark.asyncio
+    async def test_range_mode_emits_low_high_and_targetmode(self, db, db_path):
+        """Range targets emit targetMode='range' + targetLow/targetHigh so iOS
+        can render 'in range' rather than 'exceeded' for a mid-range reading."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-r", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, range_low, range_high, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sess-r", "AA:BB:CC:DD:EE:FF", 1, "range", 55.0, 70.0, "Ribs", "C"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-r",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 60.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        p1 = state["probes"][0]
+        assert p1["targetMode"] == "range"
+        assert p1["targetLow"] == 55.0
+        assert p1["targetHigh"] == 70.0
+        # The single scalar `target` is the legacy fixed-mode field — it must
+        # not appear on a range-mode probe.
+        assert "target" not in p1
+
+    @pytest.mark.asyncio
+    async def test_range_mode_in_fahrenheit_converts_both_bounds(self, db, db_path):
+        """Range target stored in F must have both bounds converted to C."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-rf", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, range_low, range_high, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sess-rf", "AA:BB:CC:DD:EE:FF", 1, "range", 225.0, 250.0, "BBQ", "F"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-rf",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 110.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        p1 = state["probes"][0]
+        assert p1["targetMode"] == "range"
+        assert p1["targetLow"] == pytest.approx((225.0 - 32.0) * 5.0 / 9.0, abs=0.01)
+        assert p1["targetHigh"] == pytest.approx((250.0 - 32.0) * 5.0 / 9.0, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_fixed_target_emits_targetmode_fixed(self, db, db_path):
+        """Fixed mode emits targetMode='fixed' alongside target so iOS can
+        dispatch on the mode rather than inferring from field presence."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-fx", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-fx", "AA:BB:CC:DD:EE:FF", 1, "fixed", 93.0, "Brisket", "C"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-fx",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 85.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        p1 = state["probes"][0]
+        assert p1["target"] == 93.0
+        assert p1["targetMode"] == "fixed"
+        assert "targetLow" not in p1
+        assert "targetHigh" not in p1
+
+    @pytest.mark.asyncio
+    async def test_celsius_target_passed_through_unchanged(self, db, db_path):
+        """Target stored in C must be emitted unchanged."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-c", "2026-04-15T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-c", "AA:BB:CC:DD:EE:FF", 1, "fixed", 90.0, "Pork", "C"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-c",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 85.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        assert state["probes"][0]["target"] == 90.0
 
 
 # ---------------------------------------------------------------------------

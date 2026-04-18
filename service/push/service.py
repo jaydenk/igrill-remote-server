@@ -36,6 +36,16 @@ _ALERT_TITLES: dict[str, str] = {
 }
 
 
+def _target_to_c(value: Optional[float], unit: str) -> Optional[float]:
+    """Convert a target temperature *value* in *unit* to Celsius, passing
+    None through unchanged. Used to normalise target-related numbers before
+    they cross the wire to iOS (LA content-state) or land in an APNS alert
+    body alongside a C reading."""
+    if value is None:
+        return None
+    return (value - 32.0) * 5.0 / 9.0 if str(unit).upper() == "F" else value
+
+
 class PushService:
     """Manages APNS push delivery and device-token persistence.
 
@@ -223,6 +233,12 @@ class PushService:
 
         Uses the probe label from the target config if available,
         otherwise falls back to "Probe N".
+
+        ``currentTemp`` is always Celsius (readings are C). Target values may
+        be stored in either unit; we convert them to Celsius for the body so
+        the two numbers share one scale — otherwise a user who configured the
+        target in Fahrenheit would see a message like "is at 70° (target:
+        165°)" which is nonsensical.
         """
         title = _ALERT_TITLES.get(alert_type, "Alert")
 
@@ -232,9 +248,10 @@ class PushService:
         probe_name = label if label else f"Probe {probe_index}"
 
         current_temp = payload.get("currentTemp")
-        target_value = target.get("target_value")
-        range_low = target.get("range_low")
-        range_high = target.get("range_high")
+        target_unit = str(target.get("unit") or "C").upper()
+        target_value = _target_to_c(target.get("target_value"), target_unit)
+        range_low = _target_to_c(target.get("range_low"), target_unit)
+        range_high = _target_to_c(target.get("range_high"), target_unit)
 
         if current_temp is not None:
             if target_value is not None:
@@ -447,7 +464,8 @@ class PushService:
         if session_id and address:
             try:
                 cursor = await self._db.execute(
-                    "SELECT probe_index, label, mode, target_value "
+                    "SELECT probe_index, label, mode, target_value, "
+                    "range_low, range_high, unit "
                     "FROM session_targets "
                     "WHERE session_id = ? AND address = ?",
                     (session_id, address),
@@ -458,6 +476,9 @@ class PushService:
                         "label": row["label"],
                         "mode": row["mode"],
                         "target_value": row["target_value"],
+                        "range_low": row["range_low"],
+                        "range_high": row["range_high"],
+                        "unit": row["unit"] if row["unit"] else "C",
                     }
             except Exception:
                 LOG.warning(
@@ -503,10 +524,21 @@ class PushService:
             temperature = probe.get("temperature")
             target_row = targets_by_index.get(index, {})
 
-            # Use target_value only for fixed-mode targets; treat range mode
-            # as no target (the iOS widget only renders a single target line).
+            # Convert F targets to C: readings are always C, and the
+            # content-state top-level `unit` stays "C" so iOS can map all
+            # numbers into the user's display unit consistently.
             mode = target_row.get("mode", "fixed")
-            target_value = target_row.get("target_value") if mode == "fixed" else None
+            target_unit = target_row.get("unit", "C")
+            raw_fixed_target = target_row.get("target_value") if mode == "fixed" else None
+            target_value = _target_to_c(raw_fixed_target, target_unit)
+            target_low = _target_to_c(
+                target_row.get("range_low") if mode == "range" else None,
+                target_unit,
+            )
+            target_high = _target_to_c(
+                target_row.get("range_high") if mode == "range" else None,
+                target_unit,
+            )
 
             label_raw = target_row.get("label") or ""
             label = label_raw if label_raw else f"Probe {index}"
@@ -524,6 +556,17 @@ class PushService:
                 probe_state["temperature"] = temperature
             if target_value is not None:
                 probe_state["target"] = target_value
+            # Range-mode extras — iOS uses these to render "in range" rather
+            # than "exceeded" when the reading sits between the bounds. The
+            # widget only gates on targetMode when deciding how to compare.
+            if mode == "range" and (target_low is not None or target_high is not None):
+                probe_state["targetMode"] = "range"
+                if target_low is not None:
+                    probe_state["targetLow"] = target_low
+                if target_high is not None:
+                    probe_state["targetHigh"] = target_high
+            elif mode == "fixed" and target_value is not None:
+                probe_state["targetMode"] = "fixed"
             if timer is not None:
                 probe_state["timer"] = timer
 

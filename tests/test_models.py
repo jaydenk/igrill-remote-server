@@ -212,6 +212,7 @@ class TestTargetConfig:
             "pre_alert_offset",
             "reminder_interval_secs",
             "label",
+            "unit",
         }
         assert set(d.keys()) == expected_keys
 
@@ -237,6 +238,37 @@ class TestTargetConfig:
         t = TargetConfig(probe_index=1, mode="fixed")
         assert t.pre_alert_offset == 5.0
         assert t.reminder_interval_secs == 0
+
+    def test_unit_defaults_to_celsius(self):
+        tc = TargetConfig(probe_index=1, mode="fixed", target_value=74.0)
+        assert tc.unit == "C"
+
+    def test_unit_roundtrip_f(self):
+        data = {"probe_index": 1, "mode": "fixed", "target_value": 165.0, "unit": "F"}
+        tc = TargetConfig.from_dict(data)
+        assert tc.unit == "F"
+        assert tc.to_dict()["unit"] == "F"
+
+    def test_unit_defaults_to_c_when_missing(self):
+        tc = TargetConfig.from_dict({"probe_index": 1, "mode": "fixed"})
+        assert tc.unit == "C"
+
+    def test_unit_rejects_unknown_value(self):
+        with pytest.raises(ValueError):
+            TargetConfig.from_dict(
+                {"probe_index": 1, "mode": "fixed", "unit": "K"}
+            )
+
+    def test_unit_normalises_case(self):
+        """Accept lowercase 'c'/'f' by normalising to the canonical uppercase form."""
+        tc = TargetConfig.from_dict(
+            {"probe_index": 1, "mode": "fixed", "target_value": 74.0, "unit": "c"}
+        )
+        assert tc.unit == "C"
+
+    def test_to_dict_keys_includes_unit(self):
+        tc = TargetConfig(probe_index=1, mode="fixed", target_value=100.0)
+        assert "unit" in tc.to_dict()
 
 
 # -----------------------------------------------------------------------

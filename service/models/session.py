@@ -28,6 +28,11 @@ class TargetConfig:
     pre_alert_offset: float = 5.0
     reminder_interval_secs: int = 0
     label: Optional[str] = None
+    # "C" or "F". Celsius is the server's canonical storage/wire unit for
+    # readings and for legacy API surfaces (LA content state, alert evaluator);
+    # this field records the unit the user configured the target in so iOS can
+    # render it in the display unit they've chosen in Settings.
+    unit: str = "C"
 
     def effective_target(self) -> Optional[float]:
         """Return the primary target temperature.
@@ -73,6 +78,13 @@ class TargetConfig:
         if label is not None:
             label = str(label)
 
+        raw_unit = data.get("unit", "C")
+        if raw_unit is None:
+            raw_unit = "C"
+        unit = str(raw_unit).upper()
+        if unit not in ("C", "F"):
+            raise ValueError(f"unit must be 'C' or 'F', got {raw_unit!r}")
+
         return cls(
             probe_index=probe_index,
             mode=mode,
@@ -82,6 +94,7 @@ class TargetConfig:
             pre_alert_offset=pre_alert_offset,
             reminder_interval_secs=reminder_interval_secs,
             label=label,
+            unit=unit,
         )
 
     def to_dict(self) -> dict:
@@ -95,6 +108,7 @@ class TargetConfig:
             "pre_alert_offset": self.pre_alert_offset,
             "reminder_interval_secs": self.reminder_interval_secs,
             "label": self.label,
+            "unit": self.unit,
         }
 
 

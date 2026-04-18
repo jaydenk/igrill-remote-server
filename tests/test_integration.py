@@ -1164,6 +1164,80 @@ async def test_ws_auto_end_clears_evaluator_state(client):
 
 
 @pytest.mark.asyncio
+async def test_ws_target_unit_round_trips_fahrenheit(client):
+    """A target saved with unit='F' must round-trip through session_start_ack,
+    target_update_ack, status, and /api/sessions/{id} unchanged."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 165, "unit": "F"},
+                    {"probe_index": 2, "mode": "fixed", "target_value": 74},  # omitted → C
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        sid = msg["payload"]["sessionId"]
+        by_idx = {t["probe_index"]: t for t in msg["payload"]["targets"]}
+        assert by_idx[1]["unit"] == "F"
+        assert by_idx[2]["unit"] == "C", "omitted unit should default to 'C'"
+
+        await ws.send_json({
+            "v": 2, "type": "target_update_request", "requestId": "r2",
+            "payload": {
+                "deviceAddress": _TEST_DEVICE,
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 200, "unit": "F"},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "target_update_ack":
+            msg = await ws.receive_json()
+        ack_target = msg["payload"]["targets"][0]
+        assert ack_target["unit"] == "F"
+        assert ack_target["target_value"] == 200
+
+        await ws.send_json({
+            "v": 2, "type": "status_request", "requestId": "r3", "payload": {},
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "status":
+            msg = await ws.receive_json()
+        assert msg["payload"]["activeTargets"][0]["unit"] == "F"
+
+    resp = await client.get(f"/api/sessions/{sid}")
+    body = await resp.json()
+    assert body["targets"][0]["unit"] == "F"
+
+
+@pytest.mark.asyncio
+async def test_ws_target_unit_invalid_rejected(client):
+    """An unknown unit (not 'C' or 'F') must be rejected with invalid_payload."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 100, "unit": "K"},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") not in ("error", "session_start_ack"):
+            msg = await ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["payload"]["code"] == "invalid_payload"
+
+
+@pytest.mark.asyncio
 async def test_ws_probe_timer_rejects_bool_probe_index(client):
     """`probe_index: true` must not pass isinstance(x, int) validation —
     bools are ints in Python, so without an explicit reject this would

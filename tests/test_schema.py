@@ -158,7 +158,7 @@ async def test_partial_migration_rolls_back(tmp_db):
 
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             row = await cursor.fetchone()
-            assert row[0] == 6
+            assert row[0] == 7
     finally:
         MIGRATIONS.clear()
         MIGRATIONS.update(original)
@@ -470,3 +470,63 @@ async def test_migration_v6_adds_target_duration_secs(store):
     ) as cursor:
         row = await cursor.fetchone()
     assert row[0] is None
+
+
+@pytest.mark.asyncio
+async def test_migration_v7_adds_unit_to_session_targets(store):
+    """Migration v7 should add a NOT NULL TEXT `unit` column defaulting to 'C'."""
+    async with store._conn.execute("PRAGMA table_info(session_targets)") as cursor:
+        rows = await cursor.fetchall()
+    columns = {r[1]: r for r in rows}
+    assert "unit" in columns, "session_targets.unit column should exist after v7"
+    col = columns["unit"]
+    assert col[2].upper() == "TEXT", f"unit should be TEXT, got {col[2]!r}"
+    assert col[3] == 1, "unit should be NOT NULL"
+    # SQLite stores the DEFAULT expression verbatim, including quotes.
+    assert col[4].strip("'\"") == "C", f"unit default should be 'C', got {col[4]!r}"
+
+
+@pytest.mark.asyncio
+async def test_migration_v7_backfills_existing_rows_with_c(tmp_db):
+    """Existing session_targets rows from before v7 should be backfilled to unit='C'."""
+    from service.db import migrations as migrations_mod
+    from service.db.migrations import run_migrations
+
+    full = dict(migrations_mod.MIGRATIONS)
+    try:
+        async with aiosqlite.connect(tmp_db) as conn:
+            conn.row_factory = aiosqlite.Row
+            await init_db(conn)
+
+            # Apply up through v6 only (pre-v7 state).
+            migrations_mod.MIGRATIONS.clear()
+            migrations_mod.MIGRATIONS.update({v: full[v] for v in full if v <= 6})
+            await run_migrations(conn)
+
+            # Seed a target row that cannot know about `unit` yet.
+            await conn.execute(
+                "INSERT INTO sessions (id, started_at, start_reason) "
+                "VALUES ('pre-v7', '2026-01-01T00:00:00Z', 'user')"
+            )
+            await conn.execute(
+                "INSERT INTO session_targets "
+                "(session_id, address, probe_index, mode, target_value) "
+                "VALUES ('pre-v7', 'AA:BB:CC', 1, 'fixed', 74.0)"
+            )
+            await conn.commit()
+
+            # Apply v7.
+            migrations_mod.MIGRATIONS.clear()
+            migrations_mod.MIGRATIONS.update(full)
+            await run_migrations(conn)
+
+            cursor = await conn.execute(
+                "SELECT unit FROM session_targets WHERE session_id = 'pre-v7'"
+            )
+            row = await cursor.fetchone()
+            assert row["unit"] == "C", (
+                "pre-v7 rows should be backfilled to 'C' by the NOT NULL DEFAULT"
+            )
+    finally:
+        migrations_mod.MIGRATIONS.clear()
+        migrations_mod.MIGRATIONS.update(full)

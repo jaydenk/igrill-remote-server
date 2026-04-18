@@ -105,6 +105,46 @@ async def test_save_and_get_targets(store):
 
 
 @pytest.mark.asyncio
+async def test_save_and_get_targets_round_trips_unit(store):
+    """unit defaults to 'C' and round-trips 'F' when set explicitly."""
+    from service.models.session import TargetConfig
+
+    start = await store.start_session(addresses=["70:91:8F:00:00:01"], reason="user")
+    sid = start["session_id"]
+    addr = "70:91:8F:00:00:01"
+
+    await store.save_targets(sid, addr, [
+        TargetConfig(probe_index=1, mode="fixed", target_value=74.0),
+        TargetConfig(probe_index=2, mode="fixed", target_value=165.0, unit="F"),
+    ])
+    loaded = sorted(await store.get_targets(sid), key=lambda t: t.probe_index)
+    assert loaded[0].unit == "C", "default unit should be 'C'"
+    assert loaded[1].unit == "F", "unit 'F' should round-trip through the store"
+    assert loaded[1].target_value == 165.0
+
+
+@pytest.mark.asyncio
+async def test_update_targets_round_trips_unit(store):
+    """update_targets replaces rows and preserves per-target unit."""
+    from service.models.session import TargetConfig
+
+    start = await store.start_session(addresses=["70:91:8F:00:00:01"], reason="user")
+    sid = start["session_id"]
+    addr = "70:91:8F:00:00:01"
+
+    await store.save_targets(sid, addr, [
+        TargetConfig(probe_index=1, mode="fixed", target_value=74.0, unit="C"),
+    ])
+    await store.update_targets(sid, addr, [
+        TargetConfig(probe_index=1, mode="fixed", target_value=165.0, unit="F"),
+    ])
+    loaded = await store.get_targets(sid)
+    assert len(loaded) == 1
+    assert loaded[0].unit == "F"
+    assert loaded[0].target_value == 165.0
+
+
+@pytest.mark.asyncio
 async def test_start_session_ends_previous(store):
     r1 = await store.start_session(addresses=["70:91:8F:00:00:01"], reason="user")
     r2 = await store.start_session(addresses=["70:91:8F:00:00:01"], reason="user")

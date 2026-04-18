@@ -71,6 +71,12 @@ MIGRATIONS: dict[int, list[str]] = {
     6: [
         "ALTER TABLE sessions ADD COLUMN target_duration_secs INTEGER",
     ],
+    7: [
+        # Persist each target's temperature unit. Celsius is canonical end-to-end;
+        # the column exists so Fahrenheit-configured cooks can be rendered in the
+        # user's chosen display unit without lossy server-side conversion.
+        "ALTER TABLE session_targets ADD COLUMN unit TEXT NOT NULL DEFAULT 'C'",
+    ],
 }
 
 
