@@ -159,6 +159,19 @@ class HistoryStore:
                 primary["started_at"],
             )
 
+            # A previous graceful shutdown called device_left_session on every
+            # active device. The session row survived, but the left_at entries
+            # would cause is_device_in_session() to return False after
+            # restart — silently breaking reading persistence and alert
+            # evaluation. Clear them here so the resumed session behaves
+            # identically to one that never stopped. (la-followups Task 1)
+            await self._conn.execute(
+                "UPDATE session_devices SET left_at = NULL "
+                "WHERE session_id = ? AND left_at IS NOT NULL",
+                (primary["id"],),
+            )
+            await self._conn.commit()
+
             if len(orphans) > 1:
                 now_ts = now_iso_utc()
                 for row in orphans[1:]:

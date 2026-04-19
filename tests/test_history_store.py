@@ -397,6 +397,39 @@ async def test_list_sessions_emits_devices_for_unregistered_address(
 
 
 @pytest.mark.asyncio
+async def test_recover_orphaned_sessions_clears_left_at(tmp_db, sample_address):
+    """A graceful shutdown sets session_devices.left_at; recovery must
+    clear it so readings resume being persisted after restart.
+
+    Without this fix is_device_in_session() would return False after
+    restart, silently dropping every subsequent BLE reading until a
+    client reconnects and manually triggers a rejoin. See la-followups
+    Task 1.
+    """
+    store = HistoryStore(tmp_db, reconnect_grace=10)
+    await store.connect()
+    try:
+        info = await store.start_session(
+            addresses=[sample_address], reason="user"
+        )
+        sid = info["session_id"]
+
+        # Simulate graceful shutdown — device marked as left.
+        await store.device_left_session(sid, sample_address)
+        assert await store.is_device_in_session(sample_address) is False
+
+        # Drop and reopen the in-memory session pointer to mimic a restart.
+        store._current_session_id = None
+        store._current_session_start_ts = None
+        await store.recover_orphaned_sessions()
+
+        assert store._current_session_id == sid
+        assert await store.is_device_in_session(sample_address) is True
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_recover_orphaned_sessions(tmp_db, sample_address):
     """Orphaned sessions (no ended_at) should be RESUMED on recovery.
 
