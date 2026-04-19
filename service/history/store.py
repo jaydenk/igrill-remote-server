@@ -868,6 +868,46 @@ class HistoryStore:
             for r in rows
         ]
 
+    async def get_targets_by_device(
+        self, session_id: str
+    ) -> dict[str, list[TargetConfig]]:
+        """Return the session's saved targets grouped by device address.
+
+        Powers the per-device ``allTargets`` field on the ``target_update``
+        and ``session_start`` broadcasts so multi-device peers can rebuild
+        their local state without losing another device's targets when
+        anyone edits one device. (la-followups Task 7)
+        """
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT address, probe_index, mode, target_value, "
+                "range_low, range_high, pre_alert_offset, "
+                "reminder_interval_secs, label, unit "
+                "FROM session_targets WHERE session_id = ?",
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+        grouped: dict[str, list[TargetConfig]] = {}
+        for r in rows:
+            grouped.setdefault(r["address"], []).append(TargetConfig(
+                probe_index=r["probe_index"],
+                mode=r["mode"],
+                target_value=r["target_value"],
+                range_low=r["range_low"],
+                range_high=r["range_high"],
+                pre_alert_offset=(
+                    r["pre_alert_offset"]
+                    if r["pre_alert_offset"] is not None else 5.0
+                ),
+                reminder_interval_secs=(
+                    r["reminder_interval_secs"]
+                    if r["reminder_interval_secs"] is not None else 0
+                ),
+                label=r["label"],
+                unit=r["unit"] if r["unit"] else "C",
+            ))
+        return grouped
+
     async def update_targets(
         self, session_id: str, address: str, targets: list[TargetConfig]
     ) -> None:

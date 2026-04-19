@@ -94,6 +94,39 @@ async def test_list_sessions(store):
 
 
 @pytest.mark.asyncio
+async def test_get_targets_by_device_groups_per_address(store):
+    """la-followups Task 7: multi-device peers need the per-device target
+    map so editing device A doesn't clobber device B's targets in their
+    local state. get_targets_by_device powers that broadcast.
+    """
+    from service.models.session import TargetConfig
+
+    await store.start_session(addresses=["A", "B"], reason="user")
+    state = await store.get_session_state()
+    sid = state["current_session_id"]
+
+    await store.save_targets(sid, "A", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=60.0, label="A.1",
+    )])
+    await store.save_targets(sid, "B", [TargetConfig(
+        probe_index=2, mode="fixed", target_value=80.0, label="B.2",
+    )])
+
+    grouped = await store.get_targets_by_device(sid)
+    assert set(grouped.keys()) == {"A", "B"}
+    assert len(grouped["A"]) == 1
+    assert grouped["A"][0].label == "A.1"
+    assert grouped["B"][0].label == "B.2"
+
+
+@pytest.mark.asyncio
+async def test_get_targets_by_device_empty_for_unknown_session(store):
+    """Unknown session id returns an empty dict, not an error."""
+    grouped = await store.get_targets_by_device("nope")
+    assert grouped == {}
+
+
+@pytest.mark.asyncio
 async def test_save_and_get_targets(store):
     from service.models.session import TargetConfig
     start = await store.start_session(addresses=["70:91:8F:00:00:01"], reason="user")

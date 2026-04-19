@@ -1546,6 +1546,111 @@ async def test_target_update_preserves_other_device_targets_in_evaluator(client)
 
 
 @pytest.mark.asyncio
+async def test_target_update_broadcast_carries_device_and_all_targets(client):
+    """la-followups Task 7: the target_update broadcast must include the
+    edited device's address and the full per-device target map so peers
+    in a multi-device cook can update local state without losing other
+    devices' targets. The REQUESTER ack remains flat so existing
+    single-device clients don't have to opt in to the new shape.
+    """
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+
+    store = client.app["store"]
+    addr_a = "AA:BB:CC:DD:EE:01"
+    addr_b = "AA:BB:CC:DD:EE:02"
+    await store.upsert(addr_a, connected=True, name="A")
+    await store.upsert(addr_b, connected=True, name="B")
+
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, \
+                   client.ws_connect("/ws") as ws_b:
+            await ws_a.send_json({
+                "v": 2, "type": "session_start_request", "requestId": "s1",
+                "payload": {
+                    "deviceAddresses": [addr_a, addr_b],
+                    "targets": [
+                        {"probe_index": 1, "mode": "fixed",
+                         "target_value": 60, "label": "base"},
+                    ],
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "session_start_ack":
+                msg = await ws_a.receive_json()
+
+            # Drain session_start broadcast on ws_b.
+            for _ in range(8):
+                try:
+                    m = await _asyncio.wait_for(
+                        ws_b.receive_json(), timeout=1.0
+                    )
+                except _asyncio.TimeoutError:
+                    break
+                if m.get("type") == "session_start":
+                    break
+
+            # Device A edits. Observe the broadcast on ws_b.
+            await ws_a.send_json({
+                "v": 2, "type": "target_update_request", "requestId": "u1",
+                "payload": {
+                    "deviceAddress": addr_a,
+                    "targets": [
+                        {"probe_index": 1, "mode": "fixed",
+                         "target_value": 70, "label": "A.1"},
+                    ],
+                },
+            })
+            broadcast = None
+            for _ in range(10):
+                try:
+                    m = await _asyncio.wait_for(
+                        ws_b.receive_json(), timeout=1.0
+                    )
+                except _asyncio.TimeoutError:
+                    break
+                if m.get("type") == "target_update":
+                    broadcast = m
+                    break
+            assert broadcast is not None, "did not observe target_update broadcast"
+
+            payload = broadcast["payload"]
+            assert payload.get("deviceAddress") == addr_a
+            all_targets = payload.get("allTargets")
+            assert isinstance(all_targets, list)
+            addresses = {row["address"] for row in all_targets}
+            assert addresses == {addr_a, addr_b}, (
+                f"allTargets must cover both session devices: {addresses}"
+            )
+
+            # Ack to the requester stays flat (no allTargets).
+            ack = None
+            for _ in range(6):
+                try:
+                    m = await _asyncio.wait_for(
+                        ws_a.receive_json(), timeout=1.0
+                    )
+                except _asyncio.TimeoutError:
+                    break
+                if m.get("type") == "target_update_ack":
+                    ack = m
+                    break
+            assert ack is not None
+            assert ack["payload"].get("deviceAddress") == addr_a
+            assert ack["payload"].get("allTargets") is not None, (
+                "ack should also carry allTargets so a self-edit can "
+                "rebuild local state without a follow-up status snapshot"
+            )
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_ws_upgrade_allow_unauthed_escape_hatch(aiohttp_client, tmp_db):
     """`allow_unauthed_ws=True` bypasses upgrade auth even when a token is
     configured. Escape hatch for dev environments where the iOS client

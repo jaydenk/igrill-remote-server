@@ -523,6 +523,14 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
 
     start_event = dict(session_info["start_event"])
     start_event["targets"] = [t.to_dict() for t in targets]
+    # la-followups Task 7: include the per-device target map so peers
+    # hydrate the multi-device state from session_start alone rather
+    # than needing a follow-up status snapshot.
+    full_by_device = await ctx.history.get_targets_by_device(new_session_id)
+    start_event["allTargets"] = [
+        {"address": addr, "targets": [t.to_dict() for t in ts]}
+        for addr, ts in full_by_device.items()
+    ]
     await ctx.store.publish_event(make_envelope("session_start", start_event))
 
     for address in device_addresses:
@@ -805,10 +813,21 @@ async def _handle_target_update(ctx: _MessageContext) -> None:
     full_targets = await ctx.history.get_targets(current_sid)
     ctx.evaluator.set_targets(current_sid, full_targets)
 
+    # la-followups Task 7: multi-device peers need the edited device's
+    # address and the authoritative per-device target map so they can
+    # rebuild their local state without losing another device's targets.
+    # Ack and broadcast carry the same shape so a self-edit on a
+    # multi-device client can also hydrate from the ack alone.
+    full_by_device = await ctx.history.get_targets_by_device(current_sid)
     payload = {
         "ok": True,
         "sessionId": current_sid,
+        "deviceAddress": target_address,
         "targets": [t.to_dict() for t in targets],
+        "allTargets": [
+            {"address": addr, "targets": [t.to_dict() for t in ts]}
+            for addr, ts in full_by_device.items()
+        ],
     }
 
     # Broadcast to all peers so other clients (iOS, other web tabs) pick
