@@ -361,6 +361,42 @@ async def test_list_sessions_includes_name_notes(store, sample_address):
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_includes_devices_with_names(store, sample_address):
+    """list_sessions must emit per-session devices with address+name+model.
+
+    iOS history list relies on ``devices[0].name`` to render a grill name
+    under each session row (task E4). If the field ever stops being
+    emitted the row shows the date twice with no device hint.
+    """
+    await store.register_device(
+        address=sample_address, name="Kitchen iGrill", model="iGrill_V3"
+    )
+    await store.start_session([sample_address], "user", name="Cook 1")
+    sessions = await store.list_sessions(limit=5)
+    assert len(sessions) == 1
+    devices = sessions[0].get("devices")
+    assert isinstance(devices, list), "devices must be a list on every row"
+    assert len(devices) == 1
+    assert devices[0]["address"] == sample_address
+    assert devices[0]["name"] == "Kitchen iGrill"
+    assert devices[0]["model"] == "iGrill_V3"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_emits_devices_for_unregistered_address(
+    store, sample_address
+):
+    """Address with no matching devices row — name/model come back null."""
+    await store.start_session([sample_address], "user")
+    sessions = await store.list_sessions(limit=5)
+    devices = sessions[0].get("devices") or []
+    assert len(devices) == 1
+    assert devices[0]["address"] == sample_address
+    assert devices[0]["name"] is None
+    assert devices[0]["model"] is None
+
+
+@pytest.mark.asyncio
 async def test_recover_orphaned_sessions(tmp_db, sample_address):
     """Orphaned sessions (no ended_at) should be RESUMED on recovery.
 
