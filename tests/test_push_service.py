@@ -797,6 +797,102 @@ class TestBuildContentState:
 
 
 # ---------------------------------------------------------------------------
+# la-followups Task 8 — multi-device content-state
+# ---------------------------------------------------------------------------
+
+
+class TestMultiDeviceContentState:
+    """_build_content_state must surface probes from every device in the
+    session, not just the firing one — otherwise a multi-device Live
+    Activity flickers between disjoint probe sets as pushes arrive."""
+
+    @pytest.mark.asyncio
+    async def test_includes_other_device_probes_as_stubs(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-m", "2026-04-17T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-m", "AA:BB:CC:DD:EE:01", 1, "fixed", 60.0, "Brisket", "C"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-m", "AA:BB:CC:DD:EE:02", 1, "fixed", 110.0, "Pit", "C"),
+        )
+        await db.commit()
+
+        # Firing reading is from device A.
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:01",
+                "sessionId": "sess-m",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 55.0}],
+                },
+            }
+        }
+        state = await svc._build_content_state(reading)
+
+        # Expect two probes: one live from A (index 1, with temperature)
+        # and one stub from B (index 1, unplugged, no temperature).
+        assert len(state["probes"]) == 2
+        by_addr = {
+            (p["deviceAddress"], p["index"]): p for p in state["probes"]
+        }
+        live = by_addr[("AA:BB:CC:DD:EE:01", 1)]
+        stub = by_addr[("AA:BB:CC:DD:EE:02", 1)]
+
+        assert live["temperature"] == 55.0
+        assert live["unplugged"] is False
+        assert live["target"] == 60.0
+        assert live["label"] == "Brisket"
+
+        assert "temperature" not in stub
+        assert stub["unplugged"] is True
+        assert stub["target"] == 110.0
+        assert stub["label"] == "Pit"
+
+    @pytest.mark.asyncio
+    async def test_single_device_session_still_emits_deviceAddress(self, db, db_path):
+        """deviceAddress must appear on every ProbeState, not just
+        multi-device cooks — the iOS decoder (Task 10) requires it to
+        distinguish probes across devices."""
+        svc = await _make_enabled_service(db_path)
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-s", "2026-04-17T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-s", "AA:BB:CC:DD:EE:01", 1, "fixed", 74.0, "Pork", "C"),
+        )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:01",
+                "sessionId": "sess-s",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 70.0}],
+                },
+            }
+        }
+        state = await svc._build_content_state(reading)
+        assert state["probes"][0]["deviceAddress"] == "AA:BB:CC:DD:EE:01"
+
+
+# ---------------------------------------------------------------------------
 # Connection ownership (B1)
 # ---------------------------------------------------------------------------
 

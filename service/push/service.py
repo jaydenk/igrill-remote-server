@@ -501,20 +501,24 @@ class PushService:
         address = payload.get("sensorId")
         unit = data.get("unit", "C")
 
-        # Fetch per-probe targets from DB when a session is active.
-        targets_by_index: dict[int, dict] = {}
-        if session_id and address:
+        # la-followups Task 8: fetch targets and timers for the FULL
+        # session so the LA content-state spans every device, not just
+        # the firing one. Filtering by sensorId (as before) made
+        # multi-device Live Activities flicker between disjoint probe
+        # sets on every push. Key by (address, probe_index) so probes
+        # with the same index on different devices don't collide.
+        targets_by_key: dict[tuple[str, int], dict] = {}
+        if session_id:
             try:
                 cursor = await self._db.execute(
-                    "SELECT probe_index, label, mode, target_value, "
+                    "SELECT address, probe_index, label, mode, target_value, "
                     "range_low, range_high, unit "
-                    "FROM session_targets "
-                    "WHERE session_id = ? AND address = ?",
-                    (session_id, address),
+                    "FROM session_targets WHERE session_id = ?",
+                    (session_id,),
                 )
                 rows = await cursor.fetchall()
                 for row in rows:
-                    targets_by_index[row["probe_index"]] = {
+                    targets_by_key[(row["address"], row["probe_index"])] = {
                         "label": row["label"],
                         "mode": row["mode"],
                         "target_value": row["target_value"],
@@ -524,26 +528,22 @@ class PushService:
                     }
             except Exception:
                 LOG.warning(
-                    "Failed to fetch session_targets for session=%s address=%s",
-                    session_id,
-                    address,
-                    exc_info=True,
+                    "Failed to fetch session_targets for session=%s",
+                    session_id, exc_info=True,
                 )
 
-        # Fetch per-probe timers from DB when a session is active.
-        timers_by_index: dict[int, dict] = {}
-        if session_id and address:
+        timers_by_key: dict[tuple[str, int], dict] = {}
+        if session_id:
             try:
                 cursor = await self._db.execute(
-                    "SELECT probe_index, mode, duration_secs, started_at, "
-                    "paused_at, accumulated_secs, completed_at "
-                    "FROM session_timers "
-                    "WHERE session_id = ? AND address = ?",
-                    (session_id, address),
+                    "SELECT address, probe_index, mode, duration_secs, "
+                    "started_at, paused_at, accumulated_secs, completed_at "
+                    "FROM session_timers WHERE session_id = ?",
+                    (session_id,),
                 )
                 rows = await cursor.fetchall()
                 for row in rows:
-                    timers_by_index[row["probe_index"]] = {
+                    timers_by_key[(row["address"], row["probe_index"])] = {
                         "mode": row["mode"],
                         "durationSecs": row["duration_secs"],
                         "startedAt": row["started_at"],
@@ -553,25 +553,25 @@ class PushService:
                     }
             except Exception:
                 LOG.warning(
-                    "Failed to fetch session_timers for session=%s address=%s",
-                    session_id,
-                    address,
-                    exc_info=True,
+                    "Failed to fetch session_timers for session=%s",
+                    session_id, exc_info=True,
                 )
 
-        # Build the ProbeState list matching the iOS schema.
-        probe_states = []
-        for probe in raw_probes:
-            index = probe.get("index", 0)
-            temperature = probe.get("temperature")
-            target_row = targets_by_index.get(index, {})
-
-            # Convert F targets to C: readings are always C, and the
-            # content-state top-level `unit` stays "C" so iOS can map all
-            # numbers into the user's display unit consistently.
+        # Helper: turn a (address, probe_index, target_row, timer_row,
+        # optional live-temp, optional unplugged-flag) into one
+        # ProbeState dict matching the iOS schema.
+        def _probe_state(
+            addr: str,
+            index: int,
+            temperature: float | None,
+            unplugged: bool,
+        ) -> dict:
+            target_row = targets_by_key.get((addr, index), {})
             mode = target_row.get("mode", "fixed")
             target_unit = target_row.get("unit", "C")
-            raw_fixed_target = target_row.get("target_value") if mode == "fixed" else None
+            raw_fixed_target = (
+                target_row.get("target_value") if mode == "fixed" else None
+            )
             target_value = _target_to_c(raw_fixed_target, target_unit)
             target_low = _target_to_c(
                 target_row.get("range_low") if mode == "range" else None,
@@ -581,38 +581,58 @@ class PushService:
                 target_row.get("range_high") if mode == "range" else None,
                 target_unit,
             )
-
             label_raw = target_row.get("label") or ""
             label = label_raw if label_raw else f"Probe {index}"
+            timer_row = timers_by_key.get((addr, index))
 
-            timer_row = timers_by_index.get(index)
-            timer = timer_row if timer_row is not None else None
-
-            probe_state: dict = {
+            state: dict = {
                 "index": index,
+                # la-followups Task 8: always stamp deviceAddress so iOS
+                # can distinguish probes across devices.
+                "deviceAddress": addr,
                 "label": label,
-                "unplugged": temperature is None,
-                "recentTemps": [],  # server has no rolling buffer; widget renders empty sparkline
+                "unplugged": unplugged,
+                "recentTemps": [],
             }
             if temperature is not None:
-                probe_state["temperature"] = temperature
+                state["temperature"] = temperature
             if target_value is not None:
-                probe_state["target"] = target_value
-            # Range-mode extras — iOS uses these to render "in range" rather
-            # than "exceeded" when the reading sits between the bounds. The
-            # widget only gates on targetMode when deciding how to compare.
-            if mode == "range" and (target_low is not None or target_high is not None):
-                probe_state["targetMode"] = "range"
+                state["target"] = target_value
+            if mode == "range" and (
+                target_low is not None or target_high is not None
+            ):
+                state["targetMode"] = "range"
                 if target_low is not None:
-                    probe_state["targetLow"] = target_low
+                    state["targetLow"] = target_low
                 if target_high is not None:
-                    probe_state["targetHigh"] = target_high
+                    state["targetHigh"] = target_high
             elif mode == "fixed" and target_value is not None:
-                probe_state["targetMode"] = "fixed"
-            if timer is not None:
-                probe_state["timer"] = timer
+                state["targetMode"] = "fixed"
+            if timer_row is not None:
+                state["timer"] = timer_row
+            return state
 
-            probe_states.append(probe_state)
+        # Live probes from the firing reading.
+        probe_states: list[dict] = []
+        seen: set[tuple[str, int]] = set()
+        for probe in raw_probes:
+            index = probe.get("index", 0)
+            temperature = probe.get("temperature")
+            firing_addr = address or ""
+            probe_states.append(_probe_state(
+                firing_addr, index, temperature, temperature is None,
+            ))
+            seen.add((firing_addr, index))
+
+        # Stub entries for probes on OTHER devices in the same session,
+        # so the LA shows a stable probe set across pushes rather than
+        # swapping to just the firing device's probes each time.
+        for (other_addr, other_index) in targets_by_key.keys():
+            if (other_addr, other_index) in seen:
+                continue
+            probe_states.append(_probe_state(
+                other_addr, other_index, None, True,
+            ))
 
         return {
             "probes": probe_states,
