@@ -1474,6 +1474,78 @@ async def test_ws_upgrade_accepted_when_token_empty(aiohttp_client, tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_target_update_preserves_other_device_targets_in_evaluator(client):
+    """la-followups Task 6: in a multi-device cook, editing device A's
+    targets must not wipe device B's targets from the alert evaluator.
+    Previously ``_handle_target_update`` passed only the edited device's
+    targets to ``evaluator.set_targets``, which replaces the whole
+    session's target list — so device B's alerts silently stopped firing
+    the moment anyone edited device A.
+    """
+    # Seed two connected devices so session_start accepts both.
+    store = client.app["store"]
+    addr_a = "AA:BB:CC:DD:EE:01"
+    addr_b = "AA:BB:CC:DD:EE:02"
+    await store.upsert(addr_a, connected=True, name="Grill A")
+    await store.upsert(addr_b, connected=True, name="Grill B")
+
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [addr_a, addr_b],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed",
+                     "target_value": 60, "label": "base"},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        sid = msg["payload"]["sessionId"]
+
+        # Seed device B with its own probe-2 target via a scoped update,
+        # so the session has distinct per-device configurations.
+        await ws.send_json({
+            "v": 2, "type": "target_update_request", "requestId": "r2",
+            "payload": {
+                "deviceAddress": addr_b,
+                "targets": [
+                    {"probe_index": 2, "mode": "fixed",
+                     "target_value": 80, "label": "B.2"},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "target_update_ack":
+            msg = await ws.receive_json()
+
+        # Now edit device A's probe-1 target. Device B's probe-2 target
+        # must survive in the evaluator.
+        await ws.send_json({
+            "v": 2, "type": "target_update_request", "requestId": "r3",
+            "payload": {
+                "deviceAddress": addr_a,
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed",
+                     "target_value": 65, "label": "A.1"},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "target_update_ack":
+            msg = await ws.receive_json()
+
+    evaluator = client.app["evaluator"]
+    probe_indices = sorted(t.probe_index for t in evaluator._targets[sid])
+    assert probe_indices == [1, 2], (
+        f"device B's probe 2 target dropped from evaluator after "
+        f"editing device A: indices={probe_indices}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_ws_upgrade_allow_unauthed_escape_hatch(aiohttp_client, tmp_db):
     """`allow_unauthed_ws=True` bypasses upgrade auth even when a token is
     configured. Escape hatch for dev environments where the iOS client

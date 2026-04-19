@@ -505,7 +505,12 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
     if targets:
         for addr in device_addresses:
             await ctx.history.save_targets(new_session_id, addr, targets)
-        ctx.evaluator.set_targets(new_session_id, targets)
+        # la-followups Task 6: load from the store so the evaluator sees
+        # the authoritative per-session list — consistent with the
+        # target_update handler and safe against future multi-device
+        # session-start flows that save different targets per address.
+        full_targets = await ctx.history.get_targets(new_session_id)
+        ctx.evaluator.set_targets(new_session_id, full_targets)
 
     if session_info.get("end_event"):
         # start_session auto-ended the previous session. Clear the evaluator's
@@ -793,7 +798,12 @@ async def _handle_target_update(ctx: _MessageContext) -> None:
             target_address = "all"
 
     await ctx.history.update_targets(current_sid, target_address, targets)
-    ctx.evaluator.set_targets(current_sid, targets)
+    # la-followups Task 6: re-seed the evaluator with the FULL per-session
+    # target list (across every device). set_targets replaces the whole
+    # session's list in-place, so passing only the edited device's targets
+    # silently dropped other devices' alerts in a multi-device cook.
+    full_targets = await ctx.history.get_targets(current_sid)
+    ctx.evaluator.set_targets(current_sid, full_targets)
 
     payload = {
         "ok": True,
