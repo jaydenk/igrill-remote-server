@@ -96,6 +96,31 @@ def create_app(config: Config) -> web.Application:
 # ---------------------------------------------------------------------------
 
 
+async def rehydrate_alert_evaluator(
+    history: HistoryStore, evaluator: AlertEvaluator
+) -> None:
+    """Seed the alert evaluator with targets from any session that was
+    resumed by ``recover_orphaned_sessions``.
+
+    Without this, alerts silently stop firing after a server restart: the
+    session row survives and BLE readings resume persisting, but the
+    evaluator's in-memory target map is empty and ``evaluate()`` returns
+    an empty event list for the unknown session id. A user who set a
+    brisket alarm before a reboot would otherwise never hear it fire.
+    (la-followups Task 2)
+    """
+    sid = await history.get_current_session_id()
+    if sid is None:
+        return
+    targets = await history.get_targets(sid)
+    if targets:
+        evaluator.set_targets(sid, targets)
+        LOG.info(
+            "Rehydrated %d alert target(s) for resumed session %s",
+            len(targets), sid,
+        )
+
+
 async def run() -> None:
     """Start the server, BLE scanner, and broadcast loops."""
     config = Config.from_env()
@@ -110,6 +135,7 @@ async def run() -> None:
     history: HistoryStore = app["history"]
     await history.connect()
     await history.recover_orphaned_sessions()
+    await rehydrate_alert_evaluator(history, app["evaluator"])
 
     # Create and connect the push service — owns its own SQLite connection
     # pointing at the same DB file as HistoryStore. WAL + busy_timeout (set

@@ -369,3 +369,64 @@ def test_celsius_target_unchanged_by_conversion():
     events = ev.evaluate("s1", [_make_probe(1, 87.0)], "sensor1")
     assert len(events) == 1
     assert events[0]["type"] == "target_approaching"
+
+
+# ---------------------------------------------------------------------------
+# la-followups Task 2 — startup rehydration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_alert_evaluator_from_resumed_session(tmp_db, sample_address):
+    """After a server restart resumes an orphaned session, the in-memory
+    AlertEvaluator starts empty and evaluate() returns no events for the
+    resumed session id. Users' alerts set before the reboot would silently
+    never fire. The startup rehydrate helper must load saved targets for
+    the current session so alerts resume firing.
+    """
+    from service.history.store import HistoryStore
+    from service.main import rehydrate_alert_evaluator
+
+    store = HistoryStore(tmp_db, reconnect_grace=10)
+    await store.connect()
+    try:
+        info = await store.start_session(
+            addresses=[sample_address], reason="user"
+        )
+        sid = info["session_id"]
+        await store.save_targets(sid, sample_address, [
+            TargetConfig(
+                probe_index=1, mode="fixed", target_value=75.0,
+                range_low=None, range_high=None,
+                pre_alert_offset=5.0, reminder_interval_secs=0,
+                label="Brisket",
+            )
+        ])
+
+        # Simulate restart: fresh evaluator, session resumes.
+        evaluator = AlertEvaluator()
+        assert evaluator._targets == {}
+
+        await rehydrate_alert_evaluator(store, evaluator)
+
+        assert sid in evaluator._targets
+        assert len(evaluator._targets[sid]) == 1
+        assert evaluator._targets[sid][0].probe_index == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_noop_when_no_resumed_session(tmp_db):
+    """With no session to resume the helper must leave the evaluator alone."""
+    from service.history.store import HistoryStore
+    from service.main import rehydrate_alert_evaluator
+
+    store = HistoryStore(tmp_db, reconnect_grace=10)
+    await store.connect()
+    try:
+        evaluator = AlertEvaluator()
+        await rehydrate_alert_evaluator(store, evaluator)
+        assert evaluator._targets == {}
+    finally:
+        await store.close()
