@@ -124,6 +124,78 @@ async def test_ws_session_update(client):
 
 
 @pytest.mark.asyncio
+async def test_ws_history_request_session_scoped_emits_targets(client):
+    """history_request scoped to a session id must surface the session's
+    saved targets on ``history_end`` so the iOS history detail chart can
+    render the target line it recorded against that specific cook.
+
+    For time-range (sessionId-less) catch-up requests the field stays
+    absent — a client already has the live targets.  See task E19.
+    """
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "name": "Session with target",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targets": [
+                    {
+                        "probe_index": 1, "mode": "fixed",
+                        "target_value": 74.0, "unit": "C", "label": "Pork",
+                    }
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        session_id = msg["payload"]["sessionId"]
+
+        await ws.send_json({
+            "v": 2, "type": "history_request", "requestId": "h1",
+            "payload": {"sessionId": session_id},
+        })
+
+        end_msg = await ws.receive_json()
+        # Drain any leading chunks (there are none for a freshly-started
+        # session, but tolerate if an unrelated broadcast arrives first).
+        while end_msg.get("type") != "history_end":
+            end_msg = await ws.receive_json()
+
+        assert end_msg["requestId"] == "h1"
+        targets = end_msg["payload"].get("targets")
+        assert targets is not None, "history_end must include targets for session-scoped request"
+        assert isinstance(targets, list)
+        assert len(targets) == 1
+        t = targets[0]
+        assert t["probe_index"] == 1
+        assert t["mode"] == "fixed"
+        assert t["target_value"] == 74.0
+        assert t["unit"] == "C"
+        assert t["label"] == "Pork"
+
+
+@pytest.mark.asyncio
+async def test_ws_history_request_time_range_omits_targets(client):
+    """Without ``sessionId`` the history request is a live catch-up and
+    the client already holds current targets. ``history_end`` must not
+    carry a ``targets`` field in that case — it's session-scoped only."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "history_request", "requestId": "h2",
+            "payload": {"sinceTs": "2026-01-01T00:00:00Z"},
+        })
+        end_msg = await ws.receive_json()
+        while end_msg.get("type") != "history_end":
+            end_msg = await ws.receive_json()
+        assert "targets" not in end_msg["payload"], (
+            "time-range history must not leak targets"
+        )
+
+
+@pytest.mark.asyncio
 async def test_ws_session_discard_happy_path(client):
     """session_discard_request hard-deletes the active session, broadcasts
     session_discarded to connected clients, and clears server state."""

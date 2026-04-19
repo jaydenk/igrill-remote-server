@@ -388,8 +388,18 @@ async def _handle_history(ctx: _MessageContext) -> None:
         await send_envelope(
             ctx.ws, "history_chunk", {"items": chunk}, request_id=ctx.request_id,
         )
+
+    end_payload: Dict[str, object] = {"count": count, "latestTs": latest_ts}
+    # Session-scoped history fetches (history detail view in the iOS app)
+    # need the saved targets so the chart can render the target line the
+    # cook was running against. Time-range catch-up requests hold current
+    # targets already, so this field stays absent for them. Task E19.
+    if session_id is not None:
+        saved_targets = await ctx.history.get_targets(session_id)
+        end_payload["targets"] = [t.to_dict() for t in saved_targets]
+
     await send_envelope(
-        ctx.ws, "history_end", {"count": count, "latestTs": latest_ts}, request_id=ctx.request_id,
+        ctx.ws, "history_end", end_payload, request_id=ctx.request_id,
     )
 
 
