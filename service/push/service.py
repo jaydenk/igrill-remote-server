@@ -7,6 +7,7 @@ no-op when APNS credentials are not configured.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Optional
@@ -273,7 +274,12 @@ class PushService:
         """Send a push notification for an alert event to all registered tokens.
 
         Uses time-sensitive interruption level so notifications break
-        through Focus modes on iOS.
+        through Focus modes on iOS. Tokens are dispatched concurrently via
+        ``asyncio.gather`` so one slow/stalled peer cannot delay the rest
+        of the fan-out — a three-second APNS timeout on one client used to
+        delay every other client behind it. A transient 5xx response is
+        retried once after a 500 ms backoff; permanent 4xx responses
+        (BadDeviceToken, Unregistered) drop the token and never retry.
         """
         if not self._enabled or self._client is None:
             return
@@ -286,10 +292,25 @@ class PushService:
         payload = event.get("payload", {})
         title, body = self.format_alert(alert_type, payload)
 
+        await asyncio.gather(
+            *(self._send_alert_to_token(token, title, body) for token in tokens),
+            return_exceptions=True,
+        )
+
+    async def _send_alert_to_token(
+        self, token: str, title: str, body: str,
+    ) -> None:
+        """Send one alert push with a single retry on transient 5xx.
+
+        Extracted from ``send_alert`` so the fan-out can schedule one
+        coroutine per token. Exceptions are caught here (rather than
+        bubbling up to ``gather``) so a 4xx-invalid-token path can still
+        execute its token-removal side effect.
+        """
         from aioapns import NotificationRequest, PushType
 
-        for token in tokens:
-            request = NotificationRequest(
+        def _build_request() -> "NotificationRequest":
+            return NotificationRequest(
                 device_token=token,
                 message={
                     "aps": {
@@ -302,23 +323,44 @@ class PushService:
                 push_type=PushType.ALERT,
             )
 
+        for attempt in range(2):  # initial + at most one retry
             try:
-                result = await self._client.send_notification(request)
-                if not result.is_successful:
-                    LOG.warning(
-                        "APNS push failed for %s…: %s",
-                        token[:8],
-                        result.description,
-                    )
-                    if result.description in _INVALID_TOKEN_REASONS:
-                        await self.remove_token(token)
-                        LOG.info(
-                            "Removed invalid token %s… (%s)",
-                            token[:8],
-                            result.description,
-                        )
+                result = await self._client.send_notification(_build_request())
             except Exception:
                 LOG.exception("Failed to send push to %s…", token[:8])
+                return
+
+            if result.is_successful:
+                return
+
+            status = getattr(result, "status", None)
+            description = result.description
+
+            if description in _INVALID_TOKEN_REASONS:
+                await self.remove_token(token)
+                LOG.info(
+                    "Removed invalid token %s… (%s)", token[:8], description,
+                )
+                return
+
+            # Retry only on transient 5xx (or unknown status — treat as
+            # retryable once). 4xx client errors that aren't invalid-token
+            # are permanent; retrying wastes APNS traffic.
+            retryable = status is None or (
+                isinstance(status, int) and status >= 500
+            )
+            if not retryable or attempt == 1:
+                LOG.warning(
+                    "APNS push failed for %s… (status=%s): %s",
+                    token[:8], status, description,
+                )
+                return
+
+            LOG.info(
+                "APNS push transient failure for %s… (status=%s) — retrying",
+                token[:8], status,
+            )
+            await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
     # Live Activity updates

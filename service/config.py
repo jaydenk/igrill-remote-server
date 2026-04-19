@@ -70,6 +70,11 @@ class Config:
     apns_team_id: str = ""
     apns_bundle_id: str = ""
     apns_use_sandbox: bool = True
+    # Escape hatch for dev environments: when True, WebSocket upgrades bypass
+    # the session-token auth gate even if ``session_token`` is configured.
+    # Per-handler writes still honour ``ctx.authorized`` so this only exposes
+    # read-only paths. Must NOT be set in production.
+    allow_unauthed_ws: bool = False
 
     def warn_if_misconfigured(self) -> None:
         """Log a prominent warning for any configuration state that will
@@ -99,6 +104,19 @@ class Config:
                 "APNS credentials not configured — push disabled. "
                 "Remote alerts and Live Activity updates will NOT fire. "
                 "Set IGRILL_APNS_* env vars to enable.",
+            )
+
+        if self.allow_unauthed_ws and self.session_token:
+            LOG.warning(
+                "IGRILL_ALLOW_UNAUTHED_WS is enabled with a configured "
+                "session_token — WebSocket upgrades bypass auth. This is a "
+                "dev-only escape hatch; disable in production."
+            )
+        if not self.session_token:
+            LOG.warning(
+                "IGRILL_SESSION_TOKEN is empty — WebSocket is unauthenticated. "
+                "Anyone who can reach the port can read status, sessions, and "
+                "history. Set a token in production."
             )
 
     @classmethod
@@ -134,4 +152,5 @@ class Config:
             apns_team_id=os.getenv("IGRILL_APNS_TEAM_ID", ""),
             apns_bundle_id=os.getenv("IGRILL_APNS_BUNDLE_ID", ""),
             apns_use_sandbox=os.getenv("IGRILL_APNS_USE_SANDBOX", "true").lower() in ("true", "1", "yes"),
+            allow_unauthed_ws=os.getenv("IGRILL_ALLOW_UNAUTHED_WS", "").lower() in ("true", "1", "yes"),
         )

@@ -193,6 +193,17 @@
         if (!raw || raw.address == null) return state;
         var probeIdx = raw.probeIndex != null ? raw.probeIndex : raw.probe_index;
         if (probeIdx == null) return state;
+        /* Scope timer updates to the currently-active session. The server
+         * can emit broadcasts for a just-ended session that race the
+         * session_end message this client receives, or — if a new session
+         * has already started — the wrong session entirely. Either way, a
+         * timer update whose sessionId doesn't match our current session
+         * would corrupt this client's activeSession.timers with rows that
+         * don't belong to the cook being shown. */
+        var rawSessionId = raw.sessionId != null ? raw.sessionId : raw.session_id;
+        if (rawSessionId != null && rawSessionId !== state.activeSession.id) {
+          return state;
+        }
         var timer = {
           sessionId: raw.sessionId != null ? raw.sessionId : raw.session_id,
           address: raw.address,

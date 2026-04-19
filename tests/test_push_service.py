@@ -1025,3 +1025,177 @@ class TestLiveActivityThrottleAfterSuccess:
             await svc.send_live_activity_update(reading)
 
         assert svc._last_la_update_ts > before
+
+
+# ---------------------------------------------------------------------------
+# send_alert fans out with gather + retry (E24)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_aioapns():
+    """Install a minimal aioapns stub into sys.modules for the duration of
+    the caller's `with` block. Mirrors the helper pattern used elsewhere in
+    this file."""
+    import sys
+    import types
+
+    fake_aioapns = types.ModuleType("aioapns")
+
+    class _FakeNotificationRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakePushType:
+        ALERT = "alert"
+        LIVEACTIVITY = "liveactivity"
+
+    fake_aioapns.NotificationRequest = _FakeNotificationRequest
+    fake_aioapns.PushType = _FakePushType
+    return patch.dict(sys.modules, {"aioapns": fake_aioapns})
+
+
+class TestSendAlertFanOut:
+    """E24: send_alert must fan out concurrently so one slow peer can't
+    stall others, retry once on transient 5xx, and drop permanently on 4xx.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_alert_fires_all_tokens_concurrently(self, db, db_path):
+        """With N tokens, all N send_notification calls must run — even if
+        one raises mid-flight. Serial `for` + `await` would short-circuit
+        on the first exception."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+            await svc.upsert_token("t2")
+            await svc.upsert_token("t3")
+
+            call_count = {"n": 0}
+
+            async def send(request):
+                call_count["n"] += 1
+                if request.device_token == "t2":
+                    raise RuntimeError("simulated timeout for t2")
+                return MagicMock(is_successful=True, description="", status=200)
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            # Must not raise even though t2's send throws.
+            await svc.send_alert({
+                "type": "target_reached",
+                "payload": {
+                    "probeIndex": 1, "currentTemp": 90,
+                    "target": {"target_value": 90, "label": None, "unit": "C"},
+                },
+            })
+
+        assert call_count["n"] == 3, (
+            f"expected fan-out to all 3 tokens, got {call_count['n']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_alert_retries_once_on_transient_5xx(self, db, db_path):
+        """A transient 5xx (InternalServerError / status >= 500) must be
+        retried exactly once after a short backoff."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+
+            call_log: list[int] = []
+
+            async def send(request):
+                call_log.append(len(call_log))
+                # First call fails with 5xx; second succeeds.
+                if len(call_log) == 1:
+                    return MagicMock(
+                        is_successful=False,
+                        description="InternalServerError",
+                        status=500,
+                    )
+                return MagicMock(is_successful=True, description="", status=200)
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            await svc.send_alert({
+                "type": "target_reached",
+                "payload": {
+                    "probeIndex": 1, "currentTemp": 90,
+                    "target": {"target_value": 90, "label": None, "unit": "C"},
+                },
+            })
+
+        assert len(call_log) == 2, (
+            f"expected 1 initial + 1 retry = 2 calls, got {len(call_log)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_alert_does_not_retry_on_4xx(self, db, db_path):
+        """4xx responses (BadDeviceToken, Unregistered, any client error)
+        must NOT retry — the problem is permanent and a retry is wasted
+        APNS traffic."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+
+            call_log: list[int] = []
+
+            async def send(request):
+                call_log.append(len(call_log))
+                return MagicMock(
+                    is_successful=False,
+                    description="BadDeviceToken",
+                    status=400,
+                )
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            await svc.send_alert({
+                "type": "target_reached",
+                "payload": {
+                    "probeIndex": 1, "currentTemp": 90,
+                    "target": {"target_value": 90, "label": None, "unit": "C"},
+                },
+            })
+
+        assert len(call_log) == 1, (
+            f"expected no retry on 4xx, got {len(call_log)} calls"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_alert_removes_invalid_token_on_4xx(self, db, db_path):
+        """When a 4xx indicates the token is dead (BadDeviceToken,
+        Unregistered), the push_tokens row must be removed so we don't
+        keep sending to it."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(
+                return_value=MagicMock(
+                    is_successful=False,
+                    description="BadDeviceToken",
+                    status=400,
+                ),
+            )
+            svc._client = mock_client
+
+            await svc.send_alert({
+                "type": "target_reached",
+                "payload": {
+                    "probeIndex": 1, "currentTemp": 90,
+                    "target": {"target_value": 90, "label": None, "unit": "C"},
+                },
+            })
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM push_tokens WHERE token = ?", ("t1",),
+        )
+        row = await cursor.fetchone()
+        assert row[0] == 0, "BadDeviceToken should have removed the token"

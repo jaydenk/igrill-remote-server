@@ -195,15 +195,29 @@ class WebSocketHub:
 
 
 def is_authorized(request: web.Request) -> bool:
-    """Check whether the request carries a valid Bearer token."""
+    """Check whether the request carries a valid Bearer token.
+
+    Accepts the token via the ``Authorization: Bearer <token>`` header (the
+    preferred form, used by the iOS client) OR the ``?token=<token>`` query
+    string fallback (web clients can't set arbitrary headers on the native
+    WebSocket constructor, so they fall back to the query string).
+
+    Returns True when no ``session_token`` is configured — that's the dev
+    default, where any client can talk to the server. In production the
+    server operator should always set a token.
+    """
     config: Config = request.app["config"]
     token = config.session_token
     if not token:
         return True
     header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer "):
-        return False
-    return header.split(" ", 1)[1].strip() == token
+    if header.startswith("Bearer "):
+        if header.split(" ", 1)[1].strip() == token:
+            return True
+    query_token = request.rel_url.query.get("token", "")
+    if query_token and query_token == token:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +925,16 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     config: Config = request.app["config"]
     simulator: Optional[SimulationRunner] = request.app.get("simulator")
     authorized = is_authorized(request)
+
+    # A3: reject the upgrade entirely when auth fails — unless the escape
+    # hatch is enabled for dev — so unauthenticated peers never see status,
+    # session, or history reads. Per-handler `ctx.authorized` gates remain in
+    # place as defence-in-depth (and to let the escape-hatch path block
+    # writes while permitting read-only inspection during dev).
+    if not authorized and not config.allow_unauthed_ws:
+        peer = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or "unknown"
+        LOG.warning("Rejecting WS upgrade from %s — missing/invalid token", peer)
+        return web.Response(status=401, text="unauthorized")
 
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)

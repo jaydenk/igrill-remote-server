@@ -227,22 +227,28 @@ async def test_ws_session_discard_no_active_session(client):
 
 @pytest.mark.asyncio
 async def test_ws_session_discard_unauthorized(aiohttp_client, tmp_db):
-    """session_discard_request without Bearer auth returns unauthorized."""
+    """Defence-in-depth: even when upgrade-time auth is bypassed
+    (allow_unauthed_ws=True for dev), the per-handler `ctx.authorized`
+    check must still reject write handlers without a valid token. The
+    authorized-context flag is derived from the SAME bearer/query
+    credentials as the upgrade gate, so an upgrade that came in via the
+    escape hatch has `authorized=False` and writes still reject."""
     from service.main import create_app
 
-    cfg = Config(db_path=tmp_db, session_token="secret")
+    cfg = Config(
+        db_path=tmp_db, session_token="secret", allow_unauthed_ws=True,
+    )
     app = create_app(cfg)
     await app["history"].connect()
     try:
         c = await aiohttp_client(app)
 
-        # Seed a device and start a session by calling the store/history
-        # directly — we cannot use the session_start_request path without a
-        # token either, and the purpose of this test is only to confirm
-        # the discard handler rejects unauth.
+        # Seed a device and start a session directly via the stores.
         await c.app["store"].upsert(_TEST_DEVICE, connected=True, name="Test iGrill")
         await c.app["history"].start_session(addresses=[_TEST_DEVICE], reason="user")
 
+        # Connect without token — allowed because allow_unauthed_ws=True —
+        # but per-handler gate must still reject the discard.
         async with c.ws_connect("/ws") as ws:
             await ws.send_json({
                 "v": 2, "type": "session_discard_request", "requestId": "r1",
@@ -1268,3 +1274,154 @@ async def test_ws_probe_timer_rejects_bool_probe_index(client):
             msg = await ws.receive_json()
         assert msg["type"] == "error"
         assert msg["payload"]["code"] == "invalid_payload"
+
+
+# ---------------------------------------------------------------------------
+# A3: WebSocket upgrade-time auth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_rejected_when_token_configured_and_missing(aiohttp_client, tmp_db):
+    """When session_token is configured, the WS upgrade must 401 without a
+    Bearer token — previously the upgrade succeeded and only write handlers
+    rejected, which leaked status/history reads to unauthenticated peers."""
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db, session_token="secret")
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        resp = await c.get("/ws", headers={
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Version": "13",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        })
+        assert resp.status == 401, (
+            f"expected 401 on unauthed upgrade, got {resp.status}"
+        )
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_accepted_with_bearer_token(aiohttp_client, tmp_db):
+    """Bearer token in Authorization header must pass upgrade-time auth."""
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db, session_token="secret")
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect(
+            "/ws", headers={"Authorization": "Bearer secret"},
+        ) as ws:
+            await ws.send_json({
+                "v": 2, "type": "status_request", "requestId": "r1", "payload": {},
+            })
+            msg = await ws.receive_json()
+            while msg.get("type") not in ("status", "error"):
+                msg = await ws.receive_json()
+            assert msg["type"] == "status", (
+                f"expected status response, got {msg}"
+            )
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_accepts_query_string_token_fallback(aiohttp_client, tmp_db):
+    """Web clients can't set arbitrary headers on the native WebSocket
+    constructor, so `?token=...` is the escape hatch. Must also succeed."""
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db, session_token="secret")
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect("/ws?token=secret") as ws:
+            await ws.send_json({
+                "v": 2, "type": "status_request", "requestId": "r1", "payload": {},
+            })
+            msg = await ws.receive_json()
+            while msg.get("type") not in ("status", "error"):
+                msg = await ws.receive_json()
+            assert msg["type"] == "status"
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_rejects_wrong_bearer_token(aiohttp_client, tmp_db):
+    """Bearer token mismatch must 401, not silently succeed with authorized=False."""
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db, session_token="secret")
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        resp = await c.get("/ws", headers={
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Version": "13",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "Authorization": "Bearer nope",
+        })
+        assert resp.status == 401
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_accepted_when_token_empty(aiohttp_client, tmp_db):
+    """When session_token is empty (unconfigured), the WS must still accept
+    anonymous upgrades for dev/local use. Preserves the pre-A3 behaviour
+    for deployments that haven't set a token."""
+    from service.main import create_app
+
+    cfg = Config(db_path=tmp_db)  # no session_token
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect("/ws") as ws:
+            await ws.send_json({
+                "v": 2, "type": "status_request", "requestId": "r1", "payload": {},
+            })
+            msg = await ws.receive_json()
+            while msg.get("type") not in ("status", "error"):
+                msg = await ws.receive_json()
+            assert msg["type"] == "status"
+    finally:
+        await app["history"].close()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_allow_unauthed_escape_hatch(aiohttp_client, tmp_db):
+    """`allow_unauthed_ws=True` bypasses upgrade auth even when a token is
+    configured. Escape hatch for dev environments where the iOS client
+    doesn't yet have the token wired up."""
+    from service.main import create_app
+
+    cfg = Config(
+        db_path=tmp_db, session_token="secret", allow_unauthed_ws=True,
+    )
+    app = create_app(cfg)
+    await app["history"].connect()
+    try:
+        c = await aiohttp_client(app)
+        async with c.ws_connect("/ws") as ws:
+            await ws.send_json({
+                "v": 2, "type": "status_request", "requestId": "r1", "payload": {},
+            })
+            msg = await ws.receive_json()
+            while msg.get("type") not in ("status", "error"):
+                msg = await ws.receive_json()
+            assert msg["type"] == "status"
+    finally:
+        await app["history"].close()
