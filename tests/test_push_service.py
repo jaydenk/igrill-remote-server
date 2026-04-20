@@ -79,6 +79,31 @@ async def db(db_path):
     await conn.close()
 
 
+# Services created during a test get appended here and torn down by the
+# ``_close_services`` autouse fixture. Each PushService opens its own
+# aiosqlite connection — and aiosqlite's worker threads are non-daemon,
+# so leaking even one prevents interpreter shutdown and hangs pytest
+# (and CI) at Py_FinalizeEx.
+_open_services: list[PushService] = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_services():
+    """Ensure every PushService created in a test is closed on teardown.
+
+    Without this, the aiosqlite connection thread per service leaks as
+    a live non-daemon thread, and Python's threading._shutdown blocks
+    forever trying to join it.
+    """
+    yield
+    while _open_services:
+        svc = _open_services.pop()
+        try:
+            await svc.close()
+        except Exception:
+            pass
+
+
 async def _make_service(db_path, **kwargs):
     """Create a PushService with sensible defaults and open its DB.
 
@@ -98,6 +123,7 @@ async def _make_service(db_path, **kwargs):
     defaults.update(kwargs)
     svc = PushService(db_path=db_path, **defaults)
     await svc._open_db()
+    _open_services.append(svc)
     return svc
 
 
