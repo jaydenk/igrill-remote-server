@@ -4,7 +4,7 @@ from aiohttp import web
 from service.models.device import DeviceStore
 from service.history.store import HistoryStore
 from service.alerts.evaluator import AlertEvaluator
-from service.simulate.runner import SimulationRunner
+from service.simulate.runner import SIM_ADDRESS, SimulationRunner
 
 
 @pytest_asyncio.fixture
@@ -39,8 +39,10 @@ class TestSimulateAPI:
         assert resp.status == 200
         data = await resp.json()
         assert data["ok"] is True
-        assert "sessionId" in data
-        # Stop it
+        # No session is created by the simulator — the device presents
+        # itself and waits for the user to start a cook.
+        assert "sessionId" not in data
+        assert data["deviceAddress"] == SIM_ADDRESS
         await client.post("/api/v1/simulate/stop")
 
     @pytest.mark.asyncio
@@ -71,15 +73,40 @@ class TestSimulateAPI:
         assert data["probes"] == 4
         await client.post("/api/v1/simulate/stop")
 
+    @pytest.mark.asyncio
+    async def test_status_reflects_running_state(self, client):
+        resp = await client.get("/api/v1/simulate/status")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["running"] is False
+        assert data["address"] == SIM_ADDRESS
+
+        await client.post("/api/v1/simulate/start", json={"speed": 100})
+        resp = await client.get("/api/v1/simulate/status")
+        data = await resp.json()
+        assert data["running"] is True
+
+        await client.post("/api/v1/simulate/stop")
+        resp = await client.get("/api/v1/simulate/status")
+        data = await resp.json()
+        assert data["running"] is False
+
 
 class TestSimulateProbeTimer:
-    """POST /api/v1/simulate/probe-timer — exercise the probe-timer dispatch
-    path against a running simulated session, mirroring the WS message shape
-    real devices use."""
+    """POST /api/v1/simulate/probe-timer exercises the probe-timer dispatch
+    path. It requires an active session that includes the sim device, which
+    is now the user's responsibility to bootstrap (not the simulator's)."""
+
+    async def _start_sim_and_session(self, client):
+        await client.post("/api/v1/simulate/start", json={"speed": 100, "probes": 2})
+        history = client.app["history"]
+        await history.start_session(
+            addresses=[SIM_ADDRESS], reason="user", name="Test Cook",
+        )
 
     @pytest.mark.asyncio
     async def test_upsert_creates_timer(self, client):
-        await client.post("/api/v1/simulate/start", json={"speed": 100, "probes": 2})
+        await self._start_sim_and_session(client)
         try:
             resp = await client.post(
                 "/api/v1/simulate/probe-timer",
@@ -101,9 +128,8 @@ class TestSimulateProbeTimer:
 
     @pytest.mark.asyncio
     async def test_start_pause_resume_reset(self, client):
-        await client.post("/api/v1/simulate/start", json={"speed": 100, "probes": 2})
+        await self._start_sim_and_session(client)
         try:
-            # Set up the timer first.
             setup = await client.post(
                 "/api/v1/simulate/probe-timer",
                 json={"probe_index": 2, "action": "upsert", "mode": "count_up"},
@@ -130,7 +156,7 @@ class TestSimulateProbeTimer:
 
     @pytest.mark.asyncio
     async def test_validates_action(self, client):
-        await client.post("/api/v1/simulate/start", json={"speed": 100, "probes": 2})
+        await self._start_sim_and_session(client)
         try:
             resp = await client.post(
                 "/api/v1/simulate/probe-timer",

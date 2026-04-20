@@ -572,10 +572,6 @@ async def _handle_session_end(ctx: _MessageContext) -> None:
     ended_session_id = result["sessionId"]
     ctx.evaluator.clear_session(ended_session_id)
 
-    # Stop simulation if the ended session was a simulated one
-    if ctx.simulator and ctx.simulator.is_running:
-        await ctx.simulator.stop()
-
     await ctx.store.publish_event(make_envelope("session_end", result))
 
     await send_envelope(
@@ -616,10 +612,6 @@ async def _handle_session_discard(ctx: _MessageContext) -> None:
         return
 
     ctx.evaluator.clear_session(current_sid)
-
-    # Stop simulation if a simulated session was in progress.
-    if ctx.simulator and ctx.simulator.is_running:
-        await ctx.simulator.stop()
 
     await ctx.store.publish_event(
         make_envelope("session_discarded", {"sessionId": current_sid})

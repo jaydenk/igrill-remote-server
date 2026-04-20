@@ -1494,7 +1494,7 @@
           </select>
         </div>
       </div>
-      <button class="btn btn-brand" id="btnSimToggle">Start Simulation</button>
+      <button class="btn btn-brand" id="btnSimToggle">Start Simulated Device</button>
       <div id="simFlash" style="display:none; font-size:0.82rem; margin-top:0.5rem;"></div>
     </div>
   </section>
@@ -2887,16 +2887,6 @@
       fetchSessionReadings(session.id);
     }
 
-    /* Detect active simulation */
-    var simDevice = (session.devices || []).indexOf(SIM_ADDRESS) !== -1;
-    if (simDevice && session.id) {
-      simRunning = true;
-      simSessionId = session.id;
-    } else {
-      simRunning = false;
-      simSessionId = null;
-    }
-    updateSimUI();
   }
 
   function handleReading(payload) {
@@ -2953,11 +2943,6 @@
     setChartsVisible(true);
     renderSessionBanner();
     renderDevices();
-    if ((session.devices || []).indexOf(SIM_ADDRESS) !== -1) {
-      simRunning = true;
-      simSessionId = session.id;
-      updateSimUI();
-    }
   }
 
   function handleSessionStartAck(payload) {
@@ -2985,11 +2970,6 @@
     /* Keep charts visible with final data — don't destroy until new session or tab switch */
     renderSessionBanner();
     renderDevices();
-    if (simSessionId) {
-      simRunning = false;
-      simSessionId = null;
-      updateSimUI();
-    }
   }
 
   function handleDeviceStateChange(payload) {
@@ -3813,10 +3793,15 @@
   var settingsDevicesTotal   = document.getElementById("settingsDevicesTotal");
   var settingsDevicesConn    = document.getElementById("settingsDevicesConnected");
 
-  /* -- Simulation Controls --------------------------------------------- */
+  /* -- Simulation Controls ---------------------------------------------
+   *
+   * The simulator is presented to the server as a synthetic BLE device:
+   * Start → device appears in the device list with live probe readings.
+   * The user then starts a cook session through the normal Start Session
+   * flow — the same path real devices use.
+   */
   var SIM_ADDRESS = "SIM:UL:AT:ED:00:01";
   var simRunning = false;
-  var simSessionId = null;
 
   var simProbesSelect = document.getElementById("simProbes");
   var simSpeedSelect  = document.getElementById("simSpeed");
@@ -3824,7 +3809,7 @@
   var simFlash        = document.getElementById("simFlash");
 
   function updateSimUI() {
-    btnSimToggle.textContent = simRunning ? "Stop Simulation" : "Start Simulation";
+    btnSimToggle.textContent = simRunning ? "Stop Simulated Device" : "Start Simulated Device";
     btnSimToggle.className = simRunning ? "btn btn-danger" : "btn btn-brand";
     simProbesSelect.disabled = simRunning;
     simSpeedSelect.disabled = simRunning;
@@ -3837,6 +3822,18 @@
     setTimeout(function () { simFlash.style.display = "none"; }, 2500);
   }
 
+  /* Hydrate simRunning on first load so the toggle label reflects
+   * whatever the server thinks is true — survives page refreshes. */
+  fetch("/api/v1/simulate/status")
+    .then(function (resp) { return resp.ok ? resp.json() : null; })
+    .then(function (data) {
+      if (data && typeof data.running === "boolean") {
+        simRunning = data.running;
+        updateSimUI();
+      }
+    })
+    .catch(function () { /* non-fatal — UI falls back to default off state */ });
+
   btnSimToggle.addEventListener("click", function () {
     btnSimToggle.disabled = true;
 
@@ -3848,9 +3845,8 @@
         })
         .then(function () {
           simRunning = false;
-          simSessionId = null;
           updateSimUI();
-          showSimFlash("Simulation stopped", false);
+          showSimFlash("Simulated device stopped", false);
         })
         .catch(function (err) {
           console.warn("[iGrill] Simulation stop failed:", err);
@@ -3871,11 +3867,10 @@
           if (!resp.ok) throw new Error("HTTP " + resp.status);
           return resp.json();
         })
-        .then(function (data) {
+        .then(function () {
           simRunning = true;
-          simSessionId = data.sessionId || null;
           updateSimUI();
-          showSimFlash("Simulation started", false);
+          showSimFlash("Simulated device started — start a session to record", false);
         })
         .catch(function (err) {
           console.warn("[iGrill] Simulation start failed:", err);

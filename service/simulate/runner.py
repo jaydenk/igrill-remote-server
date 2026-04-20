@@ -1,4 +1,11 @@
-"""Background task that generates simulated iGrill readings."""
+"""Background task that generates simulated iGrill readings.
+
+The simulator presents a synthetic BLE device to the server. It registers
+that device and broadcasts probe readings continuously, exactly the way a
+real iGrill would. It does **not** start, end, or otherwise touch cook
+sessions — users drive sessions through the normal Start Session flow,
+whether the underlying device is real or simulated.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +18,6 @@ from service.api.envelope import make_envelope
 from service.history.store import HistoryStore, now_iso_utc
 from service.models.device import DeviceStore
 from service.models.reading import build_reading_payload
-from service.models.session import TargetConfig
 from service.simulate.curves import fixed_probe_temp, range_probe_temp
 
 LOG = logging.getLogger("igrill.simulate")
@@ -31,7 +37,13 @@ _PROBE_CONFIGS = [
 
 
 class SimulationRunner:
-    """Generates simulated temperature readings in a background task."""
+    """Generates simulated temperature readings in a background task.
+
+    Behaves like a BLE device from the server's point of view: register,
+    broadcast readings, disconnect on stop. Session lifecycle is handled
+    by users through the normal session APIs — the same way it is for
+    real devices.
+    """
 
     def __init__(
         self,
@@ -45,7 +57,6 @@ class SimulationRunner:
         self._evaluator = evaluator
         self._poll_interval = poll_interval
         self._task: Optional[asyncio.Task[None]] = None
-        self._session_id: Optional[str] = None
         self._tick = 0
 
     @property
@@ -56,7 +67,6 @@ class SimulationRunner:
         self,
         speed: float = 10,
         probes: int = 4,
-        probe_timers: Optional[dict[int, dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         if self.is_running:
             return {"error": "simulation already running"}
@@ -65,7 +75,9 @@ class SimulationRunner:
         speed = max(0.1, speed)
         self._tick = 0
 
-        # Register fake device
+        # Register fake device — no session work here. The device appears
+        # in the device list and starts broadcasting readings; any session
+        # handling happens through the normal user-driven flow.
         await self.store.upsert(
             SIM_ADDRESS,
             name=SIM_NAME,
@@ -77,66 +89,26 @@ class SimulationRunner:
             last_seen=now_iso_utc(),
         )
 
-        # Start session
-        session_info = await self._history.start_session(
-            addresses=[SIM_ADDRESS], reason="simulation", name="Simulated Cook",
-        )
-        self._session_id = session_info["session_id"]
-        session_start_ts = session_info["session_start_ts"]
-
-        # Broadcast session events so all connected clients (iOS, web) are notified
-        if session_info.get("end_event"):
-            await self.store.publish_event(
-                make_envelope("session_end", session_info["end_event"])
-            )
+        # Publish a device-state change so web/iOS clients see the sim
+        # device come online the same way a real BLE connect would.
         await self.store.publish_event(
-            make_envelope("session_start", session_info["start_event"])
-        )
-
-        # Register targets
-        targets = self._build_targets(probes)
-        await self._history.save_targets(self._session_id, SIM_ADDRESS, targets)
-        self._evaluator.set_targets(self._session_id, targets)
-
-        # Optional pre-attached timers — exercised by tests and sim clients
-        # that need the per-probe-timer paths without real hardware.
-        if probe_timers:
-            for probe_index, spec in probe_timers.items():
-                mode = spec.get("mode")
-                duration_secs = spec.get("duration_secs")
-                if mode not in ("count_up", "count_down"):
-                    continue
-                if mode == "count_down" and duration_secs is None:
-                    continue
-                await self._history.upsert_timer(
-                    self._session_id,
-                    SIM_ADDRESS,
-                    int(probe_index),
-                    mode,
-                    duration_secs,
-                )
-
-        # Update device with session info
-        await self.store.upsert(
-            SIM_ADDRESS,
-            session_id=self._session_id,
-            session_start_ts=session_start_ts,
+            make_envelope(
+                "device_state_change",
+                {"address": SIM_ADDRESS, "state": "connected"},
+            )
         )
 
         # Launch background reading loop
         interval = self._poll_interval / speed
-        self._task = asyncio.create_task(
-            self._reading_loop(interval, probes, targets)
-        )
+        self._task = asyncio.create_task(self._reading_loop(interval, probes))
 
         LOG.info(
-            "Simulation started: session=%s speed=%.1fx probes=%d interval=%.2fs",
-            self._session_id, speed, probes, interval,
+            "Simulation started: device=%s speed=%.1fx probes=%d interval=%.2fs",
+            SIM_ADDRESS, speed, probes, interval,
         )
 
         return {
             "ok": True,
-            "sessionId": self._session_id,
             "deviceAddress": SIM_ADDRESS,
             "speed": speed,
             "probes": probes,
@@ -153,50 +125,25 @@ class SimulationRunner:
             pass
         self._task = None
 
-        session_id = self._session_id
         ticks = self._tick
 
-        # End session and broadcast event
-        end_result = await self._history.end_session(reason="simulation_stopped")
-        if end_result:
-            await self.store.publish_event(
-                make_envelope("session_end", end_result)
-            )
-
-        # Mark device disconnected
+        # Mark device disconnected — leave any user-owned session alone.
         await self.store.upsert(SIM_ADDRESS, connected=False)
+        await self.store.publish_event(
+            make_envelope(
+                "device_state_change",
+                {"address": SIM_ADDRESS, "state": "disconnected"},
+            )
+        )
 
-        # Clean up evaluator
-        if session_id:
-            self._evaluator.clear_session(session_id)
+        LOG.info("Simulation stopped: readings=%d", ticks)
 
-        self._session_id = None
-
-        LOG.info("Simulation stopped: session=%s readings=%d", session_id, ticks)
-
-        return {"ok": True, "sessionId": session_id, "readings": ticks}
-
-    def _build_targets(self, probe_count: int) -> list[TargetConfig]:
-        targets = []
-        for i in range(probe_count):
-            label, mode, target_val, r_low, r_high, _, _, _ = _PROBE_CONFIGS[i]
-            targets.append(TargetConfig(
-                probe_index=i + 1,
-                mode=mode,
-                target_value=target_val,
-                range_low=r_low,
-                range_high=r_high,
-                pre_alert_offset=5.0,
-                reminder_interval_secs=180,
-                label=label,
-            ))
-        return targets
+        return {"ok": True, "readings": ticks}
 
     async def _reading_loop(
         self,
         interval: float,
         probe_count: int,
-        targets: list[TargetConfig],
     ) -> None:
         ws_seq = 0
         battery = 85.0
@@ -209,7 +156,6 @@ class SimulationRunner:
             probes = self._generate_probes(self._tick, probe_count)
             connected_indices = [p["index"] for p in probes if not p["unplugged"]]
 
-            # Update device store
             await self.store.upsert(
                 SIM_ADDRESS,
                 last_update=now_iso_utc(),
@@ -220,7 +166,6 @@ class SimulationRunner:
                 unit="C",
             )
 
-            # Get device entry and build reading payload
             device_entry = await self.store.get_device(SIM_ADDRESS)
             if device_entry is None:
                 break
@@ -229,31 +174,21 @@ class SimulationRunner:
             session_id = session_state.get("current_session_id")
             session_start_ts = session_state.get("current_session_start_ts")
 
-            # If the current session is no longer our simulation's own
-            # session — e.g. a real client started a cook without first
-            # stopping the simulator — stop here. Otherwise the
-            # simulator would write synthetic probe data into the real
-            # cook's history, corrupting it.
-            if self._session_id is not None and session_id != self._session_id:
-                LOG.info(
-                    "Simulation session %s diverged from current %s — stopping",
-                    self._session_id, session_id,
-                )
-                return
-
             reading_payload = build_reading_payload(
                 device_entry,
                 session_id=session_id,
                 session_start_ts=session_start_ts,
             )
 
-            # Publish to WebSocket
+            # Always publish — live probe temps show up in device cards
+            # regardless of whether a cook session is active.
             await self.store.publish_reading({
                 "seq": ws_seq,
                 "payload": reading_payload,
             })
 
-            # Record to history DB
+            # Only record into history and evaluate alerts when the user
+            # has actually started a session that includes this device.
             if session_id and await self._history.is_device_in_session(SIM_ADDRESS):
                 next_seq = await self._history.get_max_seq(session_id, SIM_ADDRESS) + 1
                 await self._history.record_reading(
@@ -266,12 +201,12 @@ class SimulationRunner:
                     heating=None,
                 )
 
-                # Evaluate alerts
-                events = self._evaluator.evaluate(session_id, probes, SIM_ADDRESS)
-                for event in events:
-                    await self.store.publish_event(
-                        make_envelope(event["type"], event["payload"])
-                    )
+                if probes:
+                    events = self._evaluator.evaluate(session_id, probes, SIM_ADDRESS)
+                    for event in events:
+                        await self.store.publish_event(
+                            make_envelope(event["type"], event["payload"])
+                        )
 
             await asyncio.sleep(interval)
 

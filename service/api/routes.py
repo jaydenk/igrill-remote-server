@@ -327,7 +327,12 @@ async def log_levels_handler(request: web.Request) -> web.Response:
 
 
 async def simulate_start_handler(request: web.Request) -> web.Response:
-    """POST /api/v1/simulate/start — start a simulated cook session."""
+    """POST /api/v1/simulate/start — spin up the synthetic BLE device.
+
+    The simulator presents as a device (probes broadcasting readings); it
+    does not start a session. Users drive sessions through the normal
+    Start Session flow, the same way they do for real devices.
+    """
     from service.api.websocket import is_authorized
     if not is_authorized(request):
         return web.json_response({"error": "unauthorised"}, status=401)
@@ -343,7 +348,6 @@ async def simulate_start_handler(request: web.Request) -> web.Response:
 
     speed = body.get("speed", 10)
     probes = body.get("probes", 4)
-    probe_timers_raw = body.get("probe_timers")
 
     try:
         speed = float(speed)
@@ -351,27 +355,27 @@ async def simulate_start_handler(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return web.json_response({"error": "speed must be a number, probes must be an integer"}, status=400)
 
-    probe_timers: Optional[dict[int, dict[str, Any]]] = None
-    if probe_timers_raw is not None:
-        if not isinstance(probe_timers_raw, dict):
-            return web.json_response(
-                {"error": "probe_timers must be an object keyed by probe index"},
-                status=400,
-            )
-        probe_timers = {}
-        for key, spec in probe_timers_raw.items():
-            try:
-                probe_timers[int(key)] = spec
-            except (TypeError, ValueError):
-                return web.json_response(
-                    {"error": f"probe_timers key {key!r} is not an integer"},
-                    status=400,
-                )
-
-    result = await simulator.start(speed=speed, probes=probes, probe_timers=probe_timers)
+    result = await simulator.start(speed=speed, probes=probes)
     if "error" in result:
         return web.json_response(result, status=409)
     return web.json_response(result)
+
+
+async def simulate_status_handler(request: web.Request) -> web.Response:
+    """GET /api/v1/simulate/status — whether the synthetic device is running."""
+    from service.api.websocket import is_authorized
+    if not is_authorized(request):
+        return web.json_response({"error": "unauthorised"}, status=401)
+
+    simulator = request.app.get("simulator")
+    if not simulator:
+        return web.json_response({"error": "simulator not available"}, status=503)
+
+    from service.simulate.runner import SIM_ADDRESS
+    return web.json_response({
+        "running": bool(simulator.is_running),
+        "address": SIM_ADDRESS,
+    })
 
 
 async def simulate_stop_handler(request: web.Request) -> web.Response:
@@ -488,6 +492,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_put("/api/config/log-levels", log_levels_handler)
     app.router.add_post("/api/v1/simulate/start", simulate_start_handler)
     app.router.add_post("/api/v1/simulate/stop", simulate_stop_handler)
+    app.router.add_get("/api/v1/simulate/status", simulate_status_handler)
     app.router.add_post(
         "/api/v1/simulate/probe-timer", simulate_probe_timer_handler
     )
