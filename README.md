@@ -114,6 +114,8 @@ Push notifications are **optional**. When configured, the server sends APNS aler
 
 Alert-type pushes (target approaching, target reached, target exceeded, reminder) are sent at APNS priority 10 with `interruption-level: time-sensitive` in the aps payload so iOS wakes the device and delivers immediately to the lock screen rather than bundling them for the next user interaction. The iOS app must declare the `com.apple.developer.usernotifications.time-sensitive` entitlement for this to take effect; without it iOS silently downgrades the delivery. Live Activity updates stay at normal priority — they're high-frequency content pushes, not wake-the-device alerts, and APNS rate-limits priority-10 traffic aggressively.
 
+Live Activity `ContentState` includes a `recentTemps` sparkline array per probe, populated server-side from the last 20 `probe_readings` for each `(address, probe_index)` pair in the active session. The cap (`_MAX_RECENT_TEMPS = 20`) intentionally matches the iOS-side `LiveActivityStateBuilder.maxRecentTemps` so server-pushed and iOS-local `ContentState` values agree. Earlier builds sent `recentTemps: []` on every server push, which wholesale-replaced the iOS-maintained sparkline and caused intermittent disappearance in the widget.
+
 ### Obtaining an APNS Key
 
 1. Sign in to the [Apple Developer Portal](https://developer.apple.com/account/).

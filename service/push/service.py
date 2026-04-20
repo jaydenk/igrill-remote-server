@@ -20,6 +20,14 @@ LOG = logging.getLogger("igrill.push")
 # Throttle interval for Live Activity pushes (seconds).
 _LA_UPDATE_INTERVAL = 15
 
+# Maximum sparkline points per probe sent in ``ContentState.recentTemps``.
+# Must match ``LiveActivityStateBuilder.maxRecentTemps`` on the iOS side —
+# when server-push and iOS-local update paths disagree on the cap, the
+# sparkline rendering flickers every time a server push arrives. Matched
+# to iOS at 20 points to keep the server-pushed ContentState equivalent
+# to what the iOS app would build locally.
+_MAX_RECENT_TEMPS = 20
+
 # APNS response descriptions that indicate a device token is no longer valid.
 # "Unregistered" (HTTP 410) — token was valid but the device unregistered.
 # "BadDeviceToken" (HTTP 400) — token is malformed or otherwise invalid.
@@ -565,6 +573,51 @@ class PushService:
                     session_id, exc_info=True,
                 )
 
+        # Fetch the last _MAX_RECENT_TEMPS non-null temperatures per
+        # (address, probe_index) for the session. Without these the
+        # server-pushed ContentState carries ``recentTemps: []`` and
+        # wholesale-replaces the iOS local sparkline every 15s — the
+        # A1 "sparkline appears then disappears intermittently" symptom
+        # reported 2026-04-20. Populating here keeps server-push and
+        # iOS-local ContentStates equivalent so neither path clobbers
+        # the other's data. Uses a window function (SQLite 3.25+;
+        # stdlib sqlite3 has this on every supported Python build) so
+        # a single query returns the last N readings per probe rather
+        # than firing one query per probe.
+        recent_by_key: dict[tuple[str, int], list[float]] = {}
+        if session_id:
+            try:
+                cursor = await self._db.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT address, probe_index, temperature, recorded_at,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY address, probe_index
+                                   ORDER BY recorded_at DESC
+                               ) AS rn
+                        FROM probe_readings
+                        WHERE session_id = ?
+                          AND temperature IS NOT NULL
+                    )
+                    SELECT address, probe_index, temperature
+                    FROM ranked
+                    WHERE rn <= ?
+                    ORDER BY address, probe_index, recorded_at ASC
+                    """,
+                    (session_id, _MAX_RECENT_TEMPS),
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    key = (row["address"], row["probe_index"])
+                    recent_by_key.setdefault(key, []).append(
+                        float(row["temperature"])
+                    )
+            except Exception:
+                LOG.warning(
+                    "Failed to fetch recent probe_readings for session=%s",
+                    session_id, exc_info=True,
+                )
+
         # Helper: turn a (address, probe_index, target_row, timer_row,
         # optional live-temp, optional unplugged-flag) into one
         # ProbeState dict matching the iOS schema.
@@ -600,7 +653,17 @@ class PushService:
                 "deviceAddress": addr,
                 "label": label,
                 "unplugged": unplugged,
-                "recentTemps": [],
+                # A1 fix (2026-04-20): populate from probe_readings
+                # history rather than emitting an empty array. An empty
+                # recentTemps on a server push clobbers the iOS-local
+                # rolling-buffer sparkline for the widget — the
+                # "sparkline appears then disappears" symptom from the
+                # 2026-04-20 end-to-end test. Temperatures are stored
+                # in Celsius (BLE-native) and state.unit is set from
+                # the reading payload, which is also Celsius, so no
+                # conversion is needed here — iOS converts to the
+                # user's display unit at render time.
+                "recentTemps": recent_by_key.get((addr, index), []),
             }
             if temperature is not None:
                 state["temperature"] = temperature

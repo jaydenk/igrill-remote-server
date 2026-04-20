@@ -73,6 +73,15 @@ async def db(db_path):
             completed_at     TEXT,
             PRIMARY KEY (session_id, address, probe_index)
         );
+
+        CREATE TABLE IF NOT EXISTS probe_readings (
+            session_id   TEXT NOT NULL,
+            address      TEXT NOT NULL,
+            recorded_at  TEXT NOT NULL,
+            seq          INTEGER NOT NULL,
+            probe_index  INTEGER NOT NULL,
+            temperature  REAL
+        );
         """
     )
     yield conn
@@ -1443,3 +1452,243 @@ class TestAlertTimeSensitivePriority:
             "LA updates must not carry APNS priority 10"
         )
         assert request.push_type == "liveactivity"
+
+
+# ---------------------------------------------------------------------------
+# A1 fix — recentTemps populated from probe_readings history
+# ---------------------------------------------------------------------------
+
+
+class TestContentStateRecentTemps:
+    """A1 (2026-04-20): the server-built ContentState must populate
+    ``recentTemps`` from ``probe_readings`` history. An empty array
+    wholesale-replaces the iOS-local rolling buffer whenever an LA push
+    lands, causing the "sparkline appears then disappears" symptom
+    reported in the end-to-end test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recent_temps_populated_from_probe_readings(self, db, db_path):
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-rt", "2026-04-20T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, label, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("sess-rt", "AA:BB:CC:DD:EE:FF", 1, "fixed", 90.0, "Brisket", "C"),
+        )
+        # Seed 5 probe_readings samples, temps 70..74°C at one-second intervals.
+        for i in range(5):
+            await db.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "sess-rt", "AA:BB:CC:DD:EE:FF",
+                    f"2026-04-20T10:00:{i:02d}Z", i, 1, 70.0 + i,
+                ),
+            )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-rt",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 74.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        probe = state["probes"][0]
+
+        assert probe["recentTemps"] == [70.0, 71.0, 72.0, 73.0, 74.0], (
+            f"expected chronological sparkline, got {probe['recentTemps']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_recent_temps_capped_at_max(self, db, db_path):
+        """Must cap at the same point count the iOS app uses
+        (``LiveActivityStateBuilder.maxRecentTemps``). If the server
+        sends more the widget may still render fine, but the two paths
+        diverge in shape — and on tight 4 KB budgets the extra points
+        erode headroom."""
+        from service.push.service import _MAX_RECENT_TEMPS
+
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-cap", "2026-04-20T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("sess-cap", "AA:BB:CC:DD:EE:FF", 1, "fixed", 90.0, "C"),
+        )
+        # Seed far more than the cap so truncation is observable.
+        total = _MAX_RECENT_TEMPS * 3
+        for i in range(total):
+            await db.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "sess-cap", "AA:BB:CC:DD:EE:FF",
+                    f"2026-04-20T10:{i // 60:02d}:{i % 60:02d}Z",
+                    i, 1, 50.0 + i * 0.5,
+                ),
+            )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-cap",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 50.0 + (total - 1) * 0.5}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        probe = state["probes"][0]
+        assert len(probe["recentTemps"]) == _MAX_RECENT_TEMPS
+        # The cap keeps the LAST N readings (most recent), so the first
+        # element should be from the (total - _MAX_RECENT_TEMPS)-th
+        # insertion — i.e. temperature 50 + (total - N) * 0.5.
+        first_kept = 50.0 + (total - _MAX_RECENT_TEMPS) * 0.5
+        assert probe["recentTemps"][0] == pytest.approx(first_kept, abs=1e-6)
+        assert probe["recentTemps"][-1] == pytest.approx(
+            50.0 + (total - 1) * 0.5, abs=1e-6
+        )
+
+    @pytest.mark.asyncio
+    async def test_recent_temps_separated_per_probe(self, db, db_path):
+        """The WHERE/PARTITION clause must separate probes — probe 1's
+        readings must not leak into probe 2's recentTemps. A naive
+        query without PARTITION BY address+probe_index would interleave
+        the two series and silently corrupt both sparklines."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-sep", "2026-04-20T10:00:00Z", "manual"),
+        )
+        for probe_idx in (1, 2):
+            await db.execute(
+                "INSERT INTO session_targets "
+                "(session_id, address, probe_index, mode, target_value, unit) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("sess-sep", "AA:BB:CC:DD:EE:FF", probe_idx, "fixed", 90.0, "C"),
+            )
+        # Probe 1 readings: 60, 61, 62. Probe 2 readings: 200, 201, 202.
+        for i in range(3):
+            await db.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("sess-sep", "AA:BB:CC:DD:EE:FF",
+                 f"2026-04-20T10:00:{i:02d}Z", i, 1, 60.0 + i),
+            )
+            await db.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("sess-sep", "AA:BB:CC:DD:EE:FF",
+                 f"2026-04-20T10:00:{i:02d}Z", i, 2, 200.0 + i),
+            )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-sep",
+                "data": {
+                    "unit": "C",
+                    "probes": [
+                        {"index": 1, "temperature": 62.0},
+                        {"index": 2, "temperature": 202.0},
+                    ],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        probe_by_index = {p["index"]: p for p in state["probes"]}
+        assert probe_by_index[1]["recentTemps"] == [60.0, 61.0, 62.0]
+        assert probe_by_index[2]["recentTemps"] == [200.0, 201.0, 202.0]
+
+    @pytest.mark.asyncio
+    async def test_recent_temps_ignores_null_temperatures(self, db, db_path):
+        """Unplugged-probe ticks store NULL temperature. The sparkline
+        must skip them — iOS decodes recentTemps as ``[Double]``
+        (non-optional), so a null would break decode and drop the
+        entire ContentState on the widget side."""
+        svc = await _make_enabled_service(db_path)
+
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, start_reason) VALUES (?, ?, ?)",
+            ("sess-null", "2026-04-20T10:00:00Z", "manual"),
+        )
+        await db.execute(
+            "INSERT INTO session_targets "
+            "(session_id, address, probe_index, mode, target_value, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("sess-null", "AA:BB:CC:DD:EE:FF", 1, "fixed", 90.0, "C"),
+        )
+        temps = [70.0, None, 72.0, None, 74.0]
+        for i, t in enumerate(temps):
+            await db.execute(
+                "INSERT INTO probe_readings "
+                "(session_id, address, recorded_at, seq, probe_index, temperature) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("sess-null", "AA:BB:CC:DD:EE:FF",
+                 f"2026-04-20T10:00:{i:02d}Z", i, 1, t),
+            )
+        await db.commit()
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": "sess-null",
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 74.0}],
+                },
+            }
+        }
+
+        state = await svc._build_content_state(reading)
+        probe = state["probes"][0]
+        assert probe["recentTemps"] == [70.0, 72.0, 74.0]
+        assert None not in probe["recentTemps"]
+
+    @pytest.mark.asyncio
+    async def test_recent_temps_empty_when_no_session(self, db, db_path):
+        """Without a session we can't query probe_readings; default
+        to the empty array rather than leaking across sessions. Widget
+        handles an empty sparkline gracefully — this is the lesser of
+        two evils when the session is unknown."""
+        svc = await _make_enabled_service(db_path)
+
+        reading = {
+            "payload": {
+                "sensorId": "AA:BB:CC:DD:EE:FF",
+                "sessionId": None,
+                "data": {
+                    "unit": "C",
+                    "probes": [{"index": 1, "temperature": 74.0}],
+                },
+            }
+        }
+        state = await svc._build_content_state(reading)
+        assert state["probes"][0]["recentTemps"] == []
