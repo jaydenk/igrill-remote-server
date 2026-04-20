@@ -1090,7 +1090,10 @@ async def broadcast_events(app: web.Application) -> None:
     store: DeviceStore = app["store"]
     hub: WebSocketHub = app["hub"]
     push_service = app.get("push_service")
-    alert_types = {"target_approaching", "target_reached", "target_exceeded", "target_reminder"}
+    alert_types = {
+        "target_approaching", "target_reached", "target_exceeded",
+        "target_reminder", "timer_complete",
+    }
     la_teardown_types = {"session_end", "session_discarded"}
 
     while True:

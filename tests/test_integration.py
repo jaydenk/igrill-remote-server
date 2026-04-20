@@ -1083,6 +1083,107 @@ async def test_countdown_completer_auto_completes_and_broadcasts(client):
             pass
 
 
+@pytest.mark.asyncio
+async def test_countdown_completer_emits_timer_complete_alert(client):
+    """F3: the completer must also publish a ``timer_complete`` alert
+    event alongside ``probe_timer_update`` so the push pipeline fires
+    an APNS notification when the app is backgrounded. ``probe_timer_update``
+    is a WebSocket-only content update — not in ``alert_types`` — so
+    without the extra event a backgrounded iOS client that has lost
+    the WebSocket would never learn the countdown finished."""
+    import asyncio as _asyncio
+    from service.api.websocket import broadcast_events
+    from service.timers import CountdownCompleter
+
+    await _seed_device(client)
+    broadcast_task = _asyncio.create_task(broadcast_events(client.app))
+    try:
+        async with client.ws_connect("/ws") as ws_a, client.ws_connect("/ws") as ws_b:
+            await _start_session_for_timer(ws_a)
+
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "tc1",
+                "payload": {
+                    "address": _TEST_DEVICE,
+                    "probe_index": 1,
+                    "action": "upsert",
+                    "mode": "count_down",
+                    "duration_secs": 1,
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "probe_timer_ack":
+                msg = await ws_a.receive_json()
+
+            await ws_a.send_json({
+                "v": 2, "type": "probe_timer_request", "requestId": "tc2",
+                "payload": {
+                    "address": _TEST_DEVICE,
+                    "probe_index": 1,
+                    "action": "start",
+                },
+            })
+            msg = await ws_a.receive_json()
+            while msg.get("type") != "probe_timer_ack":
+                msg = await ws_a.receive_json()
+
+            # Drain pre-completion events.
+            async def _drain(ws, timeout=0.3):
+                try:
+                    while True:
+                        await _asyncio.wait_for(ws.receive_json(), timeout=timeout)
+                except _asyncio.TimeoutError:
+                    pass
+
+            await _drain(ws_b)
+
+            await _asyncio.sleep(1.2)
+            completer = CountdownCompleter(
+                client.app["history"], client.app["store"],
+            )
+            assert await completer.tick() == 1
+
+            # Collect the next handful of broadcasts and look for both
+            # probe_timer_update AND timer_complete. Order isn't
+            # guaranteed across queue + broadcaster task — we just
+            # require both appear.
+            received: list[dict] = []
+            for _ in range(10):
+                try:
+                    m = await _asyncio.wait_for(ws_b.receive_json(), timeout=1.0)
+                except _asyncio.TimeoutError:
+                    break
+                received.append(m)
+
+            seen_types = {m.get("type") for m in received}
+            assert "probe_timer_update" in seen_types, (
+                f"missing probe_timer_update; saw {seen_types}"
+            )
+            assert "timer_complete" in seen_types, (
+                f"missing timer_complete alert event (needed for APNS "
+                f"delivery when app is backgrounded); saw {seen_types}"
+            )
+
+            # timer_complete payload must carry the fields format_alert
+            # needs so the push body renders correctly.
+            tc = next(m for m in received if m.get("type") == "timer_complete")
+            payload = tc["payload"]
+            assert payload["probeIndex"] == 1
+            assert payload["sensorId"] == _TEST_DEVICE
+            assert "sessionId" in payload
+            # format_alert falls back to "Probe N" when label is null,
+            # so null here is acceptable — just assert the target dict
+            # exists with the key so format_alert doesn't KeyError.
+            assert "target" in payload
+            assert "label" in payload["target"]
+    finally:
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except _asyncio.CancelledError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # session_start_request — target_duration_secs
 # ---------------------------------------------------------------------------

@@ -98,6 +98,39 @@ class CountdownCompleter:
                 )
                 continue
 
+            # F3: publish a separate timer_complete alert event so the
+            # push pipeline fires an APNS notification (priority 10,
+            # time-sensitive per F1). Without this a backgrounded iOS
+            # client that has lost the WebSocket never learns the
+            # countdown finished — probe_timer_update is a WebSocket-
+            # only content update and isn't in the alert_types set in
+            # broadcast_events, so it never reaches push_service.
+            timer_alert_payload = {
+                "sensorId": address,
+                "sessionId": session_id,
+                "probeIndex": probe_index,
+                "target": {
+                    # Label is best-effort: looking it up would need a
+                    # session_targets query per completion, and pushes
+                    # gracefully fall back to "Probe N" when label is
+                    # absent. Keeping the payload minimal keeps the
+                    # timer path decoupled from the target schema.
+                    "label": None,
+                },
+            }
+            try:
+                await self._store.publish_event(
+                    make_envelope("timer_complete", timer_alert_payload)
+                )
+            except Exception:
+                LOG.exception(
+                    "Failed to publish timer_complete for %s/%s/%s",
+                    session_id, address, probe_index,
+                )
+                # Don't `continue` — the completion itself succeeded and
+                # probe_timer_update already fired, so count this as
+                # completed even if the push side failed to enqueue.
+
             completed_count += 1
             LOG.info(
                 "Auto-completed count_down timer session=%s address=%s probe=%d",

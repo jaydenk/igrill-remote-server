@@ -430,3 +430,142 @@ async def test_rehydrate_noop_when_no_resumed_session(tmp_db):
         assert evaluator._targets == {}
     finally:
         await store.close()
+
+
+# ---------------------------------------------------------------------------
+# F2 — reminder-interval repeats while probe stays over target
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Test double for time.monotonic() that lets individual tests step
+    the clock forward deterministically. Without this the reminder tests
+    would have to sleep() for real seconds — 10+ minutes per case —
+    which is impractical in CI."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __call__(self) -> float:  # matches time.monotonic signature
+        return self.now
+
+
+def test_reminder_fires_every_interval_while_over_target(monkeypatch):
+    """F2: with a 180s reminder interval and temperature held steady over
+    the target for 10 minutes, the evaluator must emit target_reminder
+    at t=180, t=360, and t=540 — not just once."""
+    import service.alerts.evaluator as ev_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(ev_mod.time, "monotonic", clock)
+
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=75.0,
+        pre_alert_offset=5.0, reminder_interval_secs=180,
+    )
+    ev.set_targets("s1", [target])
+
+    # t=0 — probe crosses the target (82°C for a 75°C target): both
+    # reached and exceeded fire on the same tick. No reminder yet —
+    # the interval anchor starts here.
+    events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+    types = [e["type"] for e in events]
+    assert types == ["target_reached", "target_exceeded"], (
+        f"expected reached+exceeded on crossing, got {types}"
+    )
+
+    # Intermediate ticks within the interval emit nothing.
+    clock.advance(60)
+    assert ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1") == []
+    clock.advance(60)  # t=120
+    assert ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1") == []
+
+    # t=180 — first reminder fires.
+    clock.advance(60)
+    events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+    assert [e["type"] for e in events] == ["target_reminder"], (
+        f"expected target_reminder at t=180, got {[e['type'] for e in events]}"
+    )
+
+    # t=240 — still over-target, but only 60s since the last reminder →
+    # silent. Verifies the anchor advances on each reminder, not just on
+    # the original crossing.
+    clock.advance(60)
+    assert ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1") == []
+
+    # t=360 — second reminder.
+    clock.advance(120)
+    events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+    assert [e["type"] for e in events] == ["target_reminder"]
+
+    # t=540 — third reminder.
+    clock.advance(180)
+    events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+    assert [e["type"] for e in events] == ["target_reminder"]
+
+
+def test_reminder_survives_brief_dip_below_target(monkeypatch):
+    """F2: a short noise dip below the target must not cancel the
+    reminder schedule. Real iGrill readings bounce around — if any
+    sub-threshold reading reset the reminder, the user would stop
+    getting nudges whenever sensor noise crossed the line, which is
+    most of a cook."""
+    import service.alerts.evaluator as ev_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(ev_mod.time, "monotonic", clock)
+
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=75.0,
+        pre_alert_offset=5.0, reminder_interval_secs=180,
+    )
+    ev.set_targets("s1", [target])
+
+    # t=0 — cross the target.
+    ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+
+    # t=90 — temperature briefly dips under the target (noise). No
+    # new events — reached/exceeded already sent, no reminder due yet.
+    clock.advance(90)
+    assert ev.evaluate("s1", [_make_probe(1, 73.0)], "sensor1") == []
+
+    # t=120 — back over. Still no reminder due.
+    clock.advance(30)
+    assert ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1") == []
+
+    # t=180 — reminder is due 180s after the ORIGINAL crossing, not
+    # after the dip. Dip must not reset the schedule anchor.
+    clock.advance(60)
+    events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+    assert [e["type"] for e in events] == ["target_reminder"], (
+        "noise dip reset the reminder schedule — reminders must anchor "
+        "on crossings and reminders, not cancel on dips"
+    )
+
+
+def test_reminder_never_fires_when_interval_zero(monkeypatch):
+    """Guard rail: an interval of 0 means reminders are disabled. The
+    evaluator must emit no target_reminder events no matter how long
+    the probe stays over target."""
+    import service.alerts.evaluator as ev_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(ev_mod.time, "monotonic", clock)
+
+    ev = AlertEvaluator()
+    target = TargetConfig(
+        probe_index=1, mode="fixed", target_value=75.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0,
+    )
+    ev.set_targets("s1", [target])
+
+    ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")  # crossing
+    for _ in range(20):
+        clock.advance(180)
+        events = ev.evaluate("s1", [_make_probe(1, 82.0)], "sensor1")
+        assert all(e["type"] != "target_reminder" for e in events)
