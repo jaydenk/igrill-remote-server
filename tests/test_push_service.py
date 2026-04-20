@@ -1157,7 +1157,13 @@ class TestLiveActivityThrottleAfterSuccess:
 def _install_fake_aioapns():
     """Install a minimal aioapns stub into sys.modules for the duration of
     the caller's `with` block. Mirrors the helper pattern used elsewhere in
-    this file."""
+    this file.
+
+    Exposes ``PRIORITY_HIGH`` and ``PRIORITY_NORMAL`` constants so
+    ``from aioapns import PRIORITY_HIGH`` succeeds inside the service
+    under test — without these the F1 priority path raises ImportError
+    on the first alert.
+    """
     import sys
     import types
 
@@ -1173,6 +1179,8 @@ def _install_fake_aioapns():
 
     fake_aioapns.NotificationRequest = _FakeNotificationRequest
     fake_aioapns.PushType = _FakePushType
+    fake_aioapns.PRIORITY_HIGH = 10
+    fake_aioapns.PRIORITY_NORMAL = 5
     return patch.dict(sys.modules, {"aioapns": fake_aioapns})
 
 
@@ -1321,3 +1329,117 @@ class TestSendAlertFanOut:
         )
         row = await cursor.fetchone()
         assert row[0] == 0, "BadDeviceToken should have removed the token"
+
+
+# ---------------------------------------------------------------------------
+# F1: time-sensitive alert delivery
+# ---------------------------------------------------------------------------
+
+
+class TestAlertTimeSensitivePriority:
+    """F1: alert-type pushes must land at APNS priority 10 with
+    interruption-level=time-sensitive so iOS delivers immediately to the
+    lock screen instead of deferring until the next user interaction.
+
+    LA updates intentionally stay at normal priority — they're
+    high-frequency content pushes, not wake-the-device alerts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_alert_uses_priority_high(self, db, db_path):
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+
+            sent_requests: list = []
+
+            async def send(request):
+                sent_requests.append(request)
+                return MagicMock(is_successful=True, description="", status=200)
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            await svc.send_alert({
+                "type": "target_reached",
+                "payload": {
+                    "probeIndex": 1, "currentTemp": 90,
+                    "target": {"target_value": 90, "label": None, "unit": "C"},
+                },
+            })
+
+        assert len(sent_requests) == 1
+        request = sent_requests[0]
+        assert request.priority == 10, (
+            f"expected APNS priority 10 for time-sensitive delivery, "
+            f"got {request.priority}"
+        )
+        assert request.push_type == "alert"
+        aps = request.message["aps"]
+        assert aps["interruption-level"] == "time-sensitive"
+        assert aps["sound"] == "default"
+
+    @pytest.mark.asyncio
+    async def test_send_test_uses_priority_high(self, db, db_path):
+        """The diagnostic test push must match the real alert path so a
+        successful test is a real signal that alerts will also land
+        immediately."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1")
+
+            sent_requests: list = []
+
+            async def send(request):
+                sent_requests.append(request)
+                return MagicMock(is_successful=True, description="", status=200)
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            await svc.send_test()
+
+        assert len(sent_requests) == 1
+        request = sent_requests[0]
+        assert request.priority == 10
+        assert request.push_type == "alert"
+        assert request.message["aps"]["interruption-level"] == "time-sensitive"
+
+    @pytest.mark.asyncio
+    async def test_live_activity_updates_stay_at_normal_priority(
+        self, db, db_path,
+    ):
+        """LA updates must NOT be promoted to priority 10 — APNS
+        throttles high-rate priority-10 pushes aggressively and would
+        start rejecting the 15s-cadence LA traffic. LA keeps the default
+        priority (5) and its existing liveactivity push type."""
+        with _install_fake_aioapns():
+            svc = await _make_enabled_service(db_path)
+            await svc.upsert_token("t1", live_activity_token="la1")
+
+            sent_requests: list = []
+
+            async def send(request):
+                sent_requests.append(request)
+                return MagicMock(is_successful=True, description="", status=200)
+
+            mock_client = AsyncMock()
+            mock_client.send_notification = AsyncMock(side_effect=send)
+            svc._client = mock_client
+
+            reading = {
+                "payload": {"sensorId": "A", "sessionId": None,
+                            "data": {"unit": "C", "probes": []}},
+            }
+            await svc.send_live_activity_update(reading)
+
+        assert len(sent_requests) == 1
+        request = sent_requests[0]
+        # priority kwarg is not passed for LA → attribute absent on the
+        # fake; equivalent to the default (5) on real aioapns.
+        assert not hasattr(request, "priority") or request.priority != 10, (
+            "LA updates must not carry APNS priority 10"
+        )
+        assert request.push_type == "liveactivity"

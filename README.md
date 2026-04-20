@@ -112,6 +112,8 @@ Copy `env.example` to `.env` and edit values as needed. All variables are option
 
 Push notifications are **optional**. When configured, the server sends APNS alerts to registered iOS devices for target-reached events and other session alerts. Without APNS credentials the server runs normally — all alerts are still delivered to connected WebSocket clients.
 
+Alert-type pushes (target approaching, target reached, target exceeded, reminder) are sent at APNS priority 10 with `interruption-level: time-sensitive` in the aps payload so iOS wakes the device and delivers immediately to the lock screen rather than bundling them for the next user interaction. The iOS app must declare the `com.apple.developer.usernotifications.time-sensitive` entitlement for this to take effect; without it iOS silently downgrades the delivery. Live Activity updates stay at normal priority — they're high-frequency content pushes, not wake-the-device alerts, and APNS rate-limits priority-10 traffic aggressively.
+
 ### Obtaining an APNS Key
 
 1. Sign in to the [Apple Developer Portal](https://developer.apple.com/account/).

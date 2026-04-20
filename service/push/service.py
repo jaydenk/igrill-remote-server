@@ -306,8 +306,15 @@ class PushService:
         coroutine per token. Exceptions are caught here (rather than
         bubbling up to ``gather``) so a 4xx-invalid-token path can still
         execute its token-removal side effect.
+
+        Alerts are sent at APNS priority 10 (``PRIORITY_HIGH``) so iOS
+        wakes the device and delivers immediately. Without this — even
+        with ``interruption-level: time-sensitive`` in the aps payload —
+        APNS defaults to priority 5 and iOS defers delivery until the
+        next user interaction, causing alerts to land bundled on screen
+        wake instead of firing on the lock screen.
         """
-        from aioapns import NotificationRequest, PushType
+        from aioapns import NotificationRequest, PRIORITY_HIGH, PushType
 
         def _build_request() -> "NotificationRequest":
             return NotificationRequest(
@@ -321,6 +328,7 @@ class PushService:
                 },
                 notification_id=str(uuid4()),
                 push_type=PushType.ALERT,
+                priority=PRIORITY_HIGH,
             )
 
         for attempt in range(2):  # initial + at most one retry
@@ -656,7 +664,11 @@ class PushService:
     async def send_test(self) -> dict[str, Any]:
         """Send a test push notification to all registered tokens.
 
-        Returns a summary of delivery results per token.
+        Returns a summary of delivery results per token. Uses the same
+        time-sensitive + priority=10 path as real alerts so a diagnostic
+        test exercises the exact delivery behaviour users will see on a
+        real target-reached event — otherwise a passing test push would
+        still leave the real alert path deferring until screen wake.
         """
         if not self._enabled or self._client is None:
             return {"error": "push notifications not configured"}
@@ -665,7 +677,7 @@ class PushService:
         if not tokens:
             return {"error": "no push tokens registered"}
 
-        from aioapns import NotificationRequest, PushType
+        from aioapns import NotificationRequest, PRIORITY_HIGH, PushType
 
         results: list[dict[str, Any]] = []
         for token in tokens:
@@ -678,10 +690,12 @@ class PushService:
                             "body": "Push notifications are working.",
                         },
                         "sound": "default",
+                        "interruption-level": "time-sensitive",
                     },
                 },
                 notification_id=str(uuid4()),
                 push_type=PushType.ALERT,
+                priority=PRIORITY_HIGH,
             )
             try:
                 result = await self._client.send_notification(request)
