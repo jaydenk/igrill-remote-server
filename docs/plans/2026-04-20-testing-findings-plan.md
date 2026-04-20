@@ -139,6 +139,17 @@ actually emitted at 76, not a display-time drift.
 observe that crossing alerts report a value at or below threshold, not
 above. Final sign-off needs real hardware.
 
+**Verdict (2026-04-20):** Hypothesis "float-based" confirmed.
+`service/alerts/evaluator.py` reads `temp: float = probe["temperature"]`
+and compares with `temp >= threshold` / `temp >= effective_target_c`
+— no int truncation on the comparison path. `_target_to_celsius` and
+`_offset_to_celsius` both return floats. So this is simulator tick
+granularity (15 s cadence + ±1.5 °C noise + exponential approach
+stepping 0.5–2 °C per tick), not an evaluator bug. The optional
+display-clamp in step 3 was not wired — the overshoot value is
+still informative, and real iGrill hardware at ~3 s / 0.1 °C
+resolution won't exhibit the symptom. Marked closed.
+
 ---
 
 ## Execution order
