@@ -552,6 +552,42 @@ def test_reminder_survives_brief_dip_below_target(monkeypatch):
     )
 
 
+def test_set_targets_resets_flags_when_old_target_had_no_effective():
+    """Re-arming guard: if the previous target had no effective target
+    (e.g. range with range_high unset), and the new target does, flags
+    must reset so the probe crossing the new threshold still fires."""
+    ev = AlertEvaluator()
+    # Seed with a fully-defined target and arm the flags.
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=70.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="x",
+    )])
+    ev.evaluate("s1", [_make_probe(1, 72.0)], "A")
+    assert ev._state[("s1", 1)].exceeded_sent
+
+    # Replace with a range target that has range_high unset —
+    # effective_target() is None.
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="range", range_low=None, range_high=None,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="x",
+    )])
+    # With no effective target, evaluate() returns no events for this probe.
+    assert ev.evaluate("s1", [_make_probe(1, 72.0)], "A") == []
+
+    # Now swap back to a concrete fixed target. Flags should have been
+    # reset when the None-effective target was set (or at the latest
+    # when the new concrete target replaces the None one — both are
+    # acceptable; test the end state).
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=90.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="x",
+    )])
+    events = ev.evaluate("s1", [_make_probe(1, 91.0)], "A")
+    assert any(e["type"] == "target_exceeded" for e in events), (
+        f"flags must have re-armed across the None-effective target: got {events}"
+    )
+
+
 def test_reminder_never_fires_when_interval_zero(monkeypatch):
     """Guard rail: an interval of 0 means reminders are disabled. The
     evaluator must emit no target_reminder events no matter how long

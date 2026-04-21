@@ -70,28 +70,38 @@ class AlertEvaluator:
         for key in stale:
             del self._state[key]
         # Preserve existing state; only create fresh state for new probes.
-        # Exception: if the new effective target (in °C) is strictly greater
-        # than the old one, re-arm all one-shots so the probe crossing the
-        # new higher threshold fires alerts again (fixes the silent-cook bug).
+        # Re-arm (replace with fresh ProbeAlertState) when the effective
+        # target is raised, so the probe crossing the new higher threshold
+        # fires alerts again (fixes the silent-cook bug).
+        # Also re-arm when either side has no effective target: a None-effective
+        # target (e.g. a range with range_high unset) cannot be compared, so we
+        # treat it as a boundary event and re-arm to ensure no crossing is
+        # silently skipped.  Using a fresh instance rather than resetting fields
+        # individually means any future fields added to ProbeAlertState are
+        # automatically covered.
         for t in targets:
             key = (session_id, t.probe_index)
             if key not in self._state:
+                # New probe — start with clean state.
                 self._state[key] = ProbeAlertState()
             else:
                 old_t = old_target_by_idx.get(t.probe_index)
                 if old_t is not None:
+                    # Probe had a prior target — decide whether to re-arm.
                     old_eff = old_t.effective_target()
                     new_eff = t.effective_target()
-                    if old_eff is not None and new_eff is not None:
+                    if old_eff is None or new_eff is None:
+                        # Either side lacks a comparable effective target;
+                        # treat the transition as a re-arm so nothing is
+                        # silently skipped when a real target follows.
+                        self._state[key] = ProbeAlertState()
+                    else:
                         old_c = _target_to_celsius(old_eff, old_t.unit)
                         new_c = _target_to_celsius(new_eff, t.unit)
                         if new_c > old_c:
-                            existing_state = self._state[key]
-                            existing_state.approaching_sent = False
-                            existing_state.approaching_high_sent = False
-                            existing_state.reached_sent = False
-                            existing_state.exceeded_sent = False
-                            existing_state.last_reminder_ts = 0.0
+                            # Target raised — re-arm for the new threshold.
+                            self._state[key] = ProbeAlertState()
+                        # else: target unchanged or lowered — preserve state.
 
     def clear_session(self, session_id: str) -> None:
         """Remove all targets and state for *session_id*."""
