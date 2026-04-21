@@ -19,7 +19,7 @@ from service.api.envelope import (
 )
 from service.alerts.evaluator import AlertEvaluator
 from service.config import Config
-from service.history.store import HistoryStore, now_iso_utc
+from service.history.store import HistoryStore, TimerCompletedError, now_iso_utc
 from service.models.device import DeviceStore
 from service.models.session import TargetConfig
 from service.simulate.runner import SimulationRunner
@@ -696,14 +696,13 @@ async def _handle_probe_timer(ctx: _MessageContext) -> None:
                 request_id=ctx.request_id,
             )
             return
+    except TimerCompletedError as exc:
+        await send_error(ctx.ws, "timer_completed", str(exc), request_id=ctx.request_id)
+        return
     except ValueError as exc:
         message = str(exc)
-        # NOTE: these string checks are coupled to the messages raised in
-        # HistoryStore — keep them in sync if the exception messages change.
         if action == "upsert" and "mode must be" in message:
             code = "invalid_mode"
-        elif "completed" in message.lower():
-            code = "timer_completed"
         else:
             code = "timer_not_found"
         await send_error(ctx.ws, code, message, request_id=ctx.request_id)

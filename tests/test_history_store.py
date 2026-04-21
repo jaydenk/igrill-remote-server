@@ -1744,3 +1744,24 @@ async def test_start_timer_rejects_completed_timer(store):
 
     with pytest.raises(ValueError, match="completed"):
         await store.start_timer(sid, "AA:BB", 1)
+
+
+@pytest.mark.asyncio
+async def test_resume_timer_rejects_completed_timer(store):
+    """A completed timer is terminal — resume_timer must raise ValueError
+    rather than reviving it. A stale client sending action='resume' after
+    completion would otherwise clear paused_at, undoing the terminal
+    state and risking a duplicate timer_complete dispatch."""
+    start = await store.start_session(
+        addresses=["AA:BB"], reason="user",
+    )
+    sid = start["session_id"]
+    await store.upsert_timer(
+        session_id=sid, address="AA:BB", probe_index=1,
+        mode="count_down", duration_secs=60,
+    )
+    await store.start_timer(sid, "AA:BB", 1)
+    await store.complete_timer(sid, "AA:BB", 1)
+
+    with pytest.raises(ValueError, match="completed"):
+        await store.resume_timer(sid, "AA:BB", 1)

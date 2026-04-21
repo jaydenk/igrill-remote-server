@@ -60,6 +60,21 @@ def parse_iso(timestamp: str) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
+# Typed exceptions
+# ---------------------------------------------------------------------------
+
+
+class TimerCompletedError(ValueError):
+    """Raised when an operation is attempted on a completed (terminal) timer.
+
+    Subclasses ``ValueError`` for backwards compatibility with callers that
+    already catch ``ValueError``, but provides a distinct type so the
+    WebSocket handler can map it to the ``"timer_completed"`` error code
+    without fragile string-matching on the exception message.
+    """
+
+
+# ---------------------------------------------------------------------------
 # HistoryStore
 # ---------------------------------------------------------------------------
 
@@ -1050,7 +1065,7 @@ class HistoryStore:
 
             # Terminal state — completed timers must not be revived.
             if row["completed_at"] is not None:
-                raise ValueError(
+                raise TimerCompletedError(
                     f"Timer is completed and cannot be started: session {session_id} "
                     f"address {address} probe {probe_index}"
                 )
@@ -1126,6 +1141,13 @@ class HistoryStore:
             if row is None:
                 raise ValueError(
                     f"Timer not found for session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
+            # Terminal state — completed timers must not be revived.
+            if row["completed_at"] is not None:
+                raise TimerCompletedError(
+                    f"Timer is completed and cannot be resumed: session {session_id} "
                     f"address {address} probe {probe_index}"
                 )
 
