@@ -46,13 +46,19 @@ class AlertEvaluator:
     def set_targets(self, session_id: str, targets: list[TargetConfig]) -> None:
         """Register (or replace) the target configs for *session_id*.
 
-        Preserves ``ProbeAlertState`` for probe indices that were already
-        being tracked — a user tweaking an in-flight target (e.g. raising
-        it above the current temperature) must NOT re-fire the
-        approaching/reached/exceeded one-shots that already dispatched
-        for that probe. Only probe indices that weren't tracked before
-        receive a fresh state.
+        Preserves ``ProbeAlertState`` for probe indices whose effective
+        target is unchanged or has been lowered. When the user raises a
+        target strictly above the old one, the one-shot flags are reset so
+        that the probe crossing the new higher threshold fires fresh
+        approaching/reached/exceeded events — without this reset the cook
+        would complete silently (the silent-cook bug).
         """
+        # Snapshot old targets before overwriting so we can compare per-probe.
+        old_targets = self._targets.get(session_id, [])
+        old_target_by_idx: dict[int, TargetConfig] = {
+            t.probe_index: t for t in old_targets
+        }
+
         self._targets[session_id] = targets
         incoming = {t.probe_index for t in targets}
         # Drop state for probes no longer in the target set — they're
@@ -64,10 +70,28 @@ class AlertEvaluator:
         for key in stale:
             del self._state[key]
         # Preserve existing state; only create fresh state for new probes.
+        # Exception: if the new effective target (in °C) is strictly greater
+        # than the old one, re-arm all one-shots so the probe crossing the
+        # new higher threshold fires alerts again (fixes the silent-cook bug).
         for t in targets:
             key = (session_id, t.probe_index)
             if key not in self._state:
                 self._state[key] = ProbeAlertState()
+            else:
+                old_t = old_target_by_idx.get(t.probe_index)
+                if old_t is not None:
+                    old_eff = old_t.effective_target()
+                    new_eff = t.effective_target()
+                    if old_eff is not None and new_eff is not None:
+                        old_c = _target_to_celsius(old_eff, old_t.unit)
+                        new_c = _target_to_celsius(new_eff, t.unit)
+                        if new_c > old_c:
+                            existing_state = self._state[key]
+                            existing_state.approaching_sent = False
+                            existing_state.approaching_high_sent = False
+                            existing_state.reached_sent = False
+                            existing_state.exceeded_sent = False
+                            existing_state.last_reminder_ts = 0.0
 
     def clear_session(self, session_id: str) -> None:
         """Remove all targets and state for *session_id*."""

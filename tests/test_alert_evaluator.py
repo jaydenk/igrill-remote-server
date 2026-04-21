@@ -158,59 +158,63 @@ def test_clear_session_only_affects_target_session():
 # ---------------------------------------------------------------------------
 
 
-def test_set_targets_preserves_state_for_unchanged_probes():
-    """Editing a target (e.g. raising it above the current temperature)
-    must NOT re-fire approaching/reached/exceeded events. The existing
-    ProbeAlertState for the same probe_index must be preserved across
-    set_targets calls; only probes appearing for the FIRST time get
-    fresh state."""
-    from service.alerts.evaluator import AlertEvaluator
-    from service.models.session import TargetConfig
+def test_set_targets_resets_flags_when_target_raised():
+    """Raising a target above an already-crossed threshold must re-arm
+    all one-shot flags so a fresh crossing of the new higher threshold
+    fires target_approaching / target_reached / target_exceeded again."""
+    ev = AlertEvaluator()
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=70.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="meat",
+    )])
+    # Seed: probe climbs past 70 → all one-shots fire.
+    ev.evaluate("s1", [_make_probe(1, 65.0)], "A")  # approaching
+    ev.evaluate("s1", [_make_probe(1, 70.0)], "A")  # reached
+    ev.evaluate("s1", [_make_probe(1, 72.0)], "A")  # exceeded
+    state_before = ev._state[("s1", 1)]
+    assert state_before.approaching_sent
+    assert state_before.reached_sent
+    assert state_before.exceeded_sent
 
-    evaluator = AlertEvaluator()
-    target = TargetConfig(
-        probe_index=1, mode="fixed", target_value=60.0,
-        range_low=None, range_high=None,
-        pre_alert_offset=5.0, reminder_interval_secs=0,
-        label="brisket",
-    )
-    evaluator.set_targets("s1", [target])
+    # User raises target to 90 (strictly above the old 70).
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=90.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="meat",
+    )])
 
-    # Walk the temperature up through approaching → reached → exceeded so
-    # each one-shot event fires once in the normal course of a cook.
-    evaluator.evaluate(
-        "s1", [{"index": 1, "temperature": 56.0, "unplugged": False}], "A",
-    )
-    evaluator.evaluate(
-        "s1", [{"index": 1, "temperature": 60.0, "unplugged": False}], "A",
-    )
-    evaluator.evaluate(
-        "s1", [{"index": 1, "temperature": 75.0, "unplugged": False}], "A",
-    )
-    state_before = evaluator._state[("s1", 1)]
-    assert (
-        state_before.approaching_sent
-        and state_before.reached_sent
-        and state_before.exceeded_sent
+    # Probe now crosses the new 90°C threshold. target_exceeded must
+    # re-fire exactly once.
+    events = ev.evaluate("s1", [_make_probe(1, 91.0)], "A")
+    exceeded = [e for e in events if e["type"] == "target_exceeded"]
+    assert len(exceeded) == 1, (
+        "target_exceeded must re-arm when the target is raised: "
+        f"got events={events}"
     )
 
-    # User tweaks the target to 80 (now ABOVE the live temp of 75).
-    new_target = TargetConfig(
-        probe_index=1, mode="fixed", target_value=80.0,
-        range_low=None, range_high=None,
-        pre_alert_offset=5.0, reminder_interval_secs=0,
-        label="brisket",
-    )
-    evaluator.set_targets("s1", [new_target])
 
-    # Next poll at 75°C. Under the new 80°C target, 75 is in the
-    # "approaching" band. Because state must be PRESERVED, approaching_sent
-    # is still True and no new events should fire — no duplicate banner.
-    events = evaluator.evaluate(
-        "s1", [{"index": 1, "temperature": 75.0, "unplugged": False}], "A",
+def test_set_targets_preserves_flags_when_target_lowered():
+    """Regression guard: lowering a target the probe has already
+    crossed must NOT re-fire — an exceeded probe that stays over a
+    lower target should stay silent."""
+    ev = AlertEvaluator()
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=70.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="meat",
+    )])
+    ev.evaluate("s1", [_make_probe(1, 72.0)], "A")  # fires reached + exceeded
+
+    # Lower target to 65 (still below probe temp — already exceeded).
+    ev.set_targets("s1", [TargetConfig(
+        probe_index=1, mode="fixed", target_value=65.0,
+        pre_alert_offset=5.0, reminder_interval_secs=0, label="meat",
+    )])
+    events = ev.evaluate("s1", [_make_probe(1, 72.0)], "A")
+    assert not any(e["type"] == "target_exceeded" for e in events), (
+        f"lowering must not re-fire exceeded: got {events}"
     )
-    assert events == [], \
-        f"set_targets wiped state and re-emitted alerts: {events}"
+    assert not any(e["type"] == "target_reached" for e in events), (
+        f"lowering must not re-fire reached: got {events}"
+    )
 
 
 def test_set_targets_fresh_state_for_new_probe_indices():
