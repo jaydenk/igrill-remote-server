@@ -1,5 +1,6 @@
 """Tests for the PushService class."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1692,3 +1693,39 @@ class TestContentStateRecentTemps:
         }
         state = await svc._build_content_state(reading)
         assert state["probes"][0]["recentTemps"] == []
+
+
+# ---------------------------------------------------------------------------
+# S3 — PushService internal lock serialises concurrent DB access
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_service_serialises_concurrent_db_access(db, db_path):
+    """Two concurrent writers touching the same aiosqlite connection must
+    be serialised by PushService's internal lock. Without the lock,
+    interleaved upserts and _get_all_tokens reads share in-flight cursor
+    state and occasionally lose rows or raise ProgrammingError."""
+    push = PushService(
+        db_path=db_path,
+        key_path="", key_id="", team_id="", bundle_id="",
+    )
+    await push.connect()
+
+    try:
+        async def spammer(prefix: str):
+            for i in range(50):
+                await push.upsert_token(token=f"{prefix}_{i:058x}")
+
+        async def reader():
+            for _ in range(50):
+                _ = await push._get_all_tokens()
+
+        await asyncio.gather(
+            spammer("a"), spammer("b"), reader(),
+        )
+
+        tokens = await push._get_all_tokens()
+        assert len(tokens) == 100, f"expected 100 tokens, got {len(tokens)}"
+    finally:
+        await push.close()

@@ -90,6 +90,7 @@ class PushService:
         self._enabled = all([key_path, key_id, team_id, bundle_id])
         self._client: Any = None  # aioapns.APNs once connected
         self._last_la_update_ts: float = 0.0
+        self._lock = asyncio.Lock()
 
         if self._enabled:
             LOG.info("Push notifications enabled (sandbox=%s)", use_sandbox)
@@ -192,44 +193,48 @@ class PushService:
         silently dropped the LA token in that path — breaking Live
         Activity updates until the user started another session.
         """
-        await self._db.execute(
-            "INSERT INTO push_tokens "
-            "(token, live_activity_token, created_at, updated_at) "
-            "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) "
-            "ON CONFLICT(token) DO UPDATE SET "
-            "live_activity_token = COALESCE(excluded.live_activity_token, "
-            "live_activity_token), "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-            (token, live_activity_token),
-        )
-        await self._db.commit()
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO push_tokens "
+                "(token, live_activity_token, created_at, updated_at) "
+                "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) "
+                "ON CONFLICT(token) DO UPDATE SET "
+                "live_activity_token = COALESCE(excluded.live_activity_token, "
+                "live_activity_token), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                (token, live_activity_token),
+            )
+            await self._db.commit()
         LOG.debug("Upserted push token: %s…", token[:8])
 
     async def remove_token(self, token: str) -> None:
         """Remove a device push token."""
-        await self._db.execute(
-            "DELETE FROM push_tokens WHERE token = ?",
-            (token,),
-        )
-        await self._db.commit()
+        async with self._lock:
+            await self._db.execute(
+                "DELETE FROM push_tokens WHERE token = ?",
+                (token,),
+            )
+            await self._db.commit()
         LOG.debug("Removed push token: %s…", token[:8])
 
     async def _get_all_tokens(self) -> list[str]:
         """Return all registered device push tokens."""
-        cursor = await self._db.execute(
-            "SELECT token FROM push_tokens",
-        )
-        rows = await cursor.fetchall()
+        async with self._lock:
+            cursor = await self._db.execute(
+                "SELECT token FROM push_tokens",
+            )
+            rows = await cursor.fetchall()
         return [row["token"] for row in rows]
 
     async def _get_la_tokens(self) -> list[str]:
         """Return all non-null Live Activity tokens."""
-        cursor = await self._db.execute(
-            "SELECT live_activity_token FROM push_tokens "
-            "WHERE live_activity_token IS NOT NULL",
-        )
-        rows = await cursor.fetchall()
+        async with self._lock:
+            cursor = await self._db.execute(
+                "SELECT live_activity_token FROM push_tokens "
+                "WHERE live_activity_token IS NOT NULL",
+            )
+            rows = await cursor.fetchall()
         return [row["live_activity_token"] for row in rows]
 
     # ------------------------------------------------------------------
@@ -523,100 +528,106 @@ class PushService:
         # multi-device Live Activities flicker between disjoint probe
         # sets on every push. Key by (address, probe_index) so probes
         # with the same index on different devices don't collide.
+        #
+        # All three DB reads are held under one lock acquisition so they
+        # see a consistent snapshot — otherwise a concurrent writer could
+        # commit between the session_targets and probe_readings queries,
+        # producing a content-state where the target and sparkline data
+        # are from different DB generations.
         targets_by_key: dict[tuple[str, int], dict] = {}
-        if session_id:
-            try:
-                cursor = await self._db.execute(
-                    "SELECT address, probe_index, label, mode, target_value, "
-                    "range_low, range_high, unit "
-                    "FROM session_targets WHERE session_id = ?",
-                    (session_id,),
-                )
-                rows = await cursor.fetchall()
-                for row in rows:
-                    targets_by_key[(row["address"], row["probe_index"])] = {
-                        "label": row["label"],
-                        "mode": row["mode"],
-                        "target_value": row["target_value"],
-                        "range_low": row["range_low"],
-                        "range_high": row["range_high"],
-                        "unit": row["unit"] if row["unit"] else "C",
-                    }
-            except Exception:
-                LOG.warning(
-                    "Failed to fetch session_targets for session=%s",
-                    session_id, exc_info=True,
-                )
-
         timers_by_key: dict[tuple[str, int], dict] = {}
-        if session_id:
-            try:
-                cursor = await self._db.execute(
-                    "SELECT address, probe_index, mode, duration_secs, "
-                    "started_at, paused_at, accumulated_secs, completed_at "
-                    "FROM session_timers WHERE session_id = ?",
-                    (session_id,),
-                )
-                rows = await cursor.fetchall()
-                for row in rows:
-                    timers_by_key[(row["address"], row["probe_index"])] = {
-                        "mode": row["mode"],
-                        "durationSecs": row["duration_secs"],
-                        "startedAt": row["started_at"],
-                        "pausedAt": row["paused_at"],
-                        "accumulatedSecs": row["accumulated_secs"],
-                        "completedAt": row["completed_at"],
-                    }
-            except Exception:
-                LOG.warning(
-                    "Failed to fetch session_timers for session=%s",
-                    session_id, exc_info=True,
-                )
-
-        # Fetch the last _MAX_RECENT_TEMPS non-null temperatures per
-        # (address, probe_index) for the session. Without these the
-        # server-pushed ContentState carries ``recentTemps: []`` and
-        # wholesale-replaces the iOS local sparkline every 15s — the
-        # A1 "sparkline appears then disappears intermittently" symptom
-        # reported 2026-04-20. Populating here keeps server-push and
-        # iOS-local ContentStates equivalent so neither path clobbers
-        # the other's data. Uses a window function (SQLite 3.25+;
-        # stdlib sqlite3 has this on every supported Python build) so
-        # a single query returns the last N readings per probe rather
-        # than firing one query per probe.
         recent_by_key: dict[tuple[str, int], list[float]] = {}
+
         if session_id:
-            try:
-                cursor = await self._db.execute(
-                    """
-                    WITH ranked AS (
-                        SELECT address, probe_index, temperature, recorded_at,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY address, probe_index
-                                   ORDER BY recorded_at DESC
-                               ) AS rn
-                        FROM probe_readings
-                        WHERE session_id = ?
-                          AND temperature IS NOT NULL
+            async with self._lock:
+                try:
+                    cursor = await self._db.execute(
+                        "SELECT address, probe_index, label, mode, target_value, "
+                        "range_low, range_high, unit "
+                        "FROM session_targets WHERE session_id = ?",
+                        (session_id,),
                     )
-                    SELECT address, probe_index, temperature
-                    FROM ranked
-                    WHERE rn <= ?
-                    ORDER BY address, probe_index, recorded_at ASC
-                    """,
-                    (session_id, _MAX_RECENT_TEMPS),
-                )
-                rows = await cursor.fetchall()
-                for row in rows:
-                    key = (row["address"], row["probe_index"])
-                    recent_by_key.setdefault(key, []).append(
-                        float(row["temperature"])
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        targets_by_key[(row["address"], row["probe_index"])] = {
+                            "label": row["label"],
+                            "mode": row["mode"],
+                            "target_value": row["target_value"],
+                            "range_low": row["range_low"],
+                            "range_high": row["range_high"],
+                            "unit": row["unit"] if row["unit"] else "C",
+                        }
+                except Exception:
+                    LOG.warning(
+                        "Failed to fetch session_targets for session=%s",
+                        session_id, exc_info=True,
                     )
-            except Exception:
-                LOG.warning(
-                    "Failed to fetch recent probe_readings for session=%s",
-                    session_id, exc_info=True,
-                )
+
+                try:
+                    cursor = await self._db.execute(
+                        "SELECT address, probe_index, mode, duration_secs, "
+                        "started_at, paused_at, accumulated_secs, completed_at "
+                        "FROM session_timers WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        timers_by_key[(row["address"], row["probe_index"])] = {
+                            "mode": row["mode"],
+                            "durationSecs": row["duration_secs"],
+                            "startedAt": row["started_at"],
+                            "pausedAt": row["paused_at"],
+                            "accumulatedSecs": row["accumulated_secs"],
+                            "completedAt": row["completed_at"],
+                        }
+                except Exception:
+                    LOG.warning(
+                        "Failed to fetch session_timers for session=%s",
+                        session_id, exc_info=True,
+                    )
+
+                # Fetch the last _MAX_RECENT_TEMPS non-null temperatures per
+                # (address, probe_index) for the session. Without these the
+                # server-pushed ContentState carries ``recentTemps: []`` and
+                # wholesale-replaces the iOS local sparkline every 15s — the
+                # A1 "sparkline appears then disappears intermittently" symptom
+                # reported 2026-04-20. Populating here keeps server-push and
+                # iOS-local ContentStates equivalent so neither path clobbers
+                # the other's data. Uses a window function (SQLite 3.25+;
+                # stdlib sqlite3 has this on every supported Python build) so
+                # a single query returns the last N readings per probe rather
+                # than firing one query per probe.
+                try:
+                    cursor = await self._db.execute(
+                        """
+                        WITH ranked AS (
+                            SELECT address, probe_index, temperature, recorded_at,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY address, probe_index
+                                       ORDER BY recorded_at DESC
+                                   ) AS rn
+                            FROM probe_readings
+                            WHERE session_id = ?
+                              AND temperature IS NOT NULL
+                        )
+                        SELECT address, probe_index, temperature
+                        FROM ranked
+                        WHERE rn <= ?
+                        ORDER BY address, probe_index, recorded_at ASC
+                        """,
+                        (session_id, _MAX_RECENT_TEMPS),
+                    )
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        key = (row["address"], row["probe_index"])
+                        recent_by_key.setdefault(key, []).append(
+                            float(row["temperature"])
+                        )
+                except Exception:
+                    LOG.warning(
+                        "Failed to fetch recent probe_readings for session=%s",
+                        session_id, exc_info=True,
+                    )
 
         # Helper: turn a (address, probe_index, target_row, timer_row,
         # optional live-temp, optional unplugged-flag) into one
@@ -713,12 +724,13 @@ class PushService:
 
     async def _remove_la_token(self, la_token: str) -> None:
         """Clear a Live Activity token from the push_tokens table."""
-        await self._db.execute(
-            "UPDATE push_tokens SET live_activity_token = NULL "
-            "WHERE live_activity_token = ?",
-            (la_token,),
-        )
-        await self._db.commit()
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE push_tokens SET live_activity_token = NULL "
+                "WHERE live_activity_token = ?",
+                (la_token,),
+            )
+            await self._db.commit()
 
     # ------------------------------------------------------------------
     # Test push
