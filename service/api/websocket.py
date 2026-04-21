@@ -593,33 +593,23 @@ async def _handle_session_discard(ctx: _MessageContext) -> None:
         )
         return
 
-    session_state = await ctx.history.get_session_state()
-    current_sid = session_state.get("current_session_id")
-    if current_sid is None:
+    discarded_sid = await ctx.history.discard_current_session()
+    if discarded_sid is None:
         await send_error(
             ctx.ws, "no_active_session", "No session is currently active.",
             request_id=ctx.request_id,
         )
         return
 
-    deleted = await ctx.history.discard_session(current_sid)
-    if not deleted:
-        await send_error(
-            ctx.ws, "session_not_found",
-            f"Session {current_sid} does not exist.",
-            request_id=ctx.request_id,
-        )
-        return
-
-    ctx.evaluator.clear_session(current_sid)
+    ctx.evaluator.clear_session(discarded_sid)
 
     await ctx.store.publish_event(
-        make_envelope("session_discarded", {"sessionId": current_sid})
+        make_envelope("session_discarded", {"sessionId": discarded_sid})
     )
 
     await send_envelope(
         ctx.ws, "session_discard_ack",
-        {"ok": True, "sessionId": current_sid},
+        {"ok": True, "sessionId": discarded_sid},
         request_id=ctx.request_id,
     )
 

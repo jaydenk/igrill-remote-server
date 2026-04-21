@@ -333,6 +333,77 @@ class HistoryStore:
             result["durationSeconds"] = duration_seconds
         return result
 
+    async def _discard_session_locked(self, session_id: str) -> bool:
+        """Delete a session and all its child rows.
+
+        **Caller must already hold** ``self._lock``.  This helper exists so
+        that both the public ``discard_session`` and the atomic
+        ``discard_current_session`` can share identical deletion logic without
+        re-acquiring the lock (which would deadlock).
+
+        Performs the full BEGIN / child-table deletes / sessions delete /
+        COMMIT sequence.  Clears the in-memory ``_current_session_id``,
+        ``_current_session_start_ts``, and ``_last_session_id`` pointers on
+        success if they matched ``session_id``.
+
+        Returns True if the ``sessions`` row was deleted, False if
+        ``session_id`` did not exist.  Raises on DB error after issuing a
+        ROLLBACK.
+        """
+        # Capture which in-memory fields would need clearing so the
+        # clears only run after a successful commit.  If the commit
+        # fails we leave in-memory state untouched to stay consistent
+        # with on-disk state.
+        was_current = self._current_session_id == session_id
+        was_last = self._last_session_id == session_id
+
+        try:
+            await self._conn.execute("BEGIN")
+            # Explicit deletes for child tables without ON DELETE CASCADE.
+            await self._conn.execute(
+                "DELETE FROM probe_readings WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._conn.execute(
+                "DELETE FROM device_readings WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._conn.execute(
+                "DELETE FROM session_targets WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._conn.execute(
+                "DELETE FROM session_devices WHERE session_id = ?",
+                (session_id,),
+            )
+            # session_timers and session_notes cascade via FK, but
+            # delete explicitly for clarity / defence in depth.
+            await self._conn.execute(
+                "DELETE FROM session_timers WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._conn.execute(
+                "DELETE FROM session_notes WHERE session_id = ?",
+                (session_id,),
+            )
+            cursor = await self._conn.execute(
+                "DELETE FROM sessions WHERE id = ?", (session_id,)
+            )
+            deleted = cursor.rowcount > 0
+            await self._conn.commit()
+
+            # Commit succeeded: safe to clear in-memory state.
+            if was_current:
+                self._current_session_id = None
+                self._current_session_start_ts = None
+            if was_last:
+                self._last_session_id = None
+        except Exception:
+            await self._conn.execute("ROLLBACK")
+            raise
+
+        return deleted
+
     async def discard_session(self, session_id: str) -> bool:
         """Hard-delete a session and every associated child row.
 
@@ -352,59 +423,33 @@ class HistoryStore:
         ``session_id`` did not exist.
         """
         async with self._lock:
-            # Capture which in-memory fields would need clearing so the
-            # clears only run after a successful commit.  If the commit
-            # fails we leave in-memory state untouched to stay consistent
-            # with on-disk state.
-            was_current = self._current_session_id == session_id
-            was_last = self._last_session_id == session_id
+            return await self._discard_session_locked(session_id)
 
-            try:
-                await self._conn.execute("BEGIN")
-                # Explicit deletes for child tables without ON DELETE CASCADE.
-                await self._conn.execute(
-                    "DELETE FROM probe_readings WHERE session_id = ?",
-                    (session_id,),
-                )
-                await self._conn.execute(
-                    "DELETE FROM device_readings WHERE session_id = ?",
-                    (session_id,),
-                )
-                await self._conn.execute(
-                    "DELETE FROM session_targets WHERE session_id = ?",
-                    (session_id,),
-                )
-                await self._conn.execute(
-                    "DELETE FROM session_devices WHERE session_id = ?",
-                    (session_id,),
-                )
-                # session_timers and session_notes cascade via FK, but
-                # delete explicitly for clarity / defence in depth.
-                await self._conn.execute(
-                    "DELETE FROM session_timers WHERE session_id = ?",
-                    (session_id,),
-                )
-                await self._conn.execute(
-                    "DELETE FROM session_notes WHERE session_id = ?",
-                    (session_id,),
-                )
-                cursor = await self._conn.execute(
-                    "DELETE FROM sessions WHERE id = ?", (session_id,)
-                )
-                deleted = cursor.rowcount > 0
-                await self._conn.commit()
+    async def discard_current_session(self) -> Optional[str]:
+        """Atomically discard whichever session is current at the moment the
+        lock is acquired. Returns the discarded session_id, or None if no
+        session is active.
 
-                # Commit succeeded: safe to clear in-memory state.
-                if was_current:
-                    self._current_session_id = None
-                    self._current_session_start_ts = None
-                if was_last:
-                    self._last_session_id = None
-            except Exception:
-                await self._conn.execute("ROLLBACK")
-                raise
-
-            return deleted
+        Exists because the handler previously called get_session_state() to
+        read _current_session_id, then called discard_session(sid) under a
+        fresh lock acquisition — a racing session_start_request could commit a
+        new session between the two, causing the discard to target the new
+        session's id. This helper reads _current_session_id and deletes under
+        one lock hold so no interleaving is possible.
+        """
+        async with self._lock:
+            sid = self._current_session_id
+            if sid is None:
+                return None
+            deleted = await self._discard_session_locked(sid)
+            if not deleted:
+                # Defensive: _current_session_id pointed at a non-existent row
+                # (only possible under a programming bug). Clear the dangling
+                # pointer so subsequent calls don't loop.
+                self._current_session_id = None
+                self._current_session_start_ts = None
+                return None
+            return sid
 
     async def get_session_state(self) -> dict:
         """Return the current session state."""

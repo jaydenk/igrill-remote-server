@@ -1765,3 +1765,69 @@ async def test_resume_timer_rejects_completed_timer(store):
 
     with pytest.raises(ValueError, match="completed"):
         await store.resume_timer(sid, "AA:BB", 1)
+
+
+@pytest.mark.asyncio
+async def test_discard_current_session_returns_id_and_clears(store):
+    """discard_current_session deletes the current session atomically
+    and returns its id."""
+    start = await store.start_session(
+        addresses=["70:91:8F:00:00:01"], reason="user",
+    )
+    sid = start["session_id"]
+    assert await store.get_current_session_id() == sid
+
+    returned = await store.discard_current_session()
+    assert returned == sid
+    assert await store.get_current_session_id() is None
+    assert not await store.session_exists(sid)
+
+
+@pytest.mark.asyncio
+async def test_discard_current_session_noop_when_inactive(store):
+    """Returns None when there is no active session."""
+    assert await store.discard_current_session() is None
+
+
+@pytest.mark.asyncio
+async def test_discard_current_session_atomic_wrt_racing_start(store):
+    """A session_start racing a discard must not leave the new session
+    vulnerable to deletion. The old check-then-delete pattern could
+    match whichever session was current at the time of the first lock
+    acquisition; the atomic helper cannot because it reads
+    _current_session_id and deletes under one lock hold.
+
+    Because the store's lock already serialises individual operations,
+    any single asyncio.gather ordering will leave the NEW session
+    alive and some earlier session deleted — the invariant being tested
+    is that gather never completes with the new session deleted."""
+    import asyncio
+
+    start_a = await store.start_session(
+        addresses=["70:91:8F:00:00:01"], reason="user",
+    )
+    sid_a = start_a["session_id"]
+
+    async def discard():
+        return await store.discard_current_session()
+
+    async def start_new():
+        await asyncio.sleep(0)  # yield to let discard win the race sometimes
+        return await store.start_session(
+            addresses=["70:91:8F:00:00:02"], reason="user",
+        )
+
+    # Run 10 trials; none of them should leave sid_b missing.
+    for _ in range(10):
+        # Reset state: ensure sid_a is current.
+        if await store.get_current_session_id() is None:
+            start_a = await store.start_session(
+                addresses=["70:91:8F:00:00:01"], reason="user",
+            )
+            sid_a = start_a["session_id"]
+
+        results = await asyncio.gather(discard(), start_new())
+        sid_b = results[1]["session_id"]
+        assert await store.session_exists(sid_b), (
+            f"new session {sid_b} must still exist after racing discard"
+        )
