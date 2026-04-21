@@ -1723,3 +1723,24 @@ async def test_find_expired_running_countdowns_skips_corrupt_rows(
     probes = sorted(e["probe_index"] for e in expired)
     assert probes == [1], \
         f"healthy countdown lost because a sibling row had corrupt state: {expired}"
+
+
+@pytest.mark.asyncio
+async def test_start_timer_rejects_completed_timer(store):
+    """A completed timer is terminal — start_timer must raise ValueError
+    rather than reviving it. A stale client sending action='start' after
+    completion would otherwise clear paused_at, undoing the terminal
+    state and risking a duplicate timer_complete dispatch."""
+    start = await store.start_session(
+        addresses=["AA:BB"], reason="user",
+    )
+    sid = start["session_id"]
+    await store.upsert_timer(
+        session_id=sid, address="AA:BB", probe_index=1,
+        mode="count_down", duration_secs=60,
+    )
+    await store.start_timer(sid, "AA:BB", 1)
+    await store.complete_timer(sid, "AA:BB", 1)
+
+    with pytest.raises(ValueError, match="completed"):
+        await store.start_timer(sid, "AA:BB", 1)

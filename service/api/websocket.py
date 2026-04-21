@@ -698,8 +698,12 @@ async def _handle_probe_timer(ctx: _MessageContext) -> None:
             return
     except ValueError as exc:
         message = str(exc)
+        # NOTE: these string checks are coupled to the messages raised in
+        # HistoryStore — keep them in sync if the exception messages change.
         if action == "upsert" and "mode must be" in message:
             code = "invalid_mode"
+        elif "completed" in message.lower():
+            code = "timer_completed"
         else:
             code = "timer_not_found"
         await send_error(ctx.ws, code, message, request_id=ctx.request_id)

@@ -1048,6 +1048,13 @@ class HistoryStore:
                     f"address {address} probe {probe_index}"
                 )
 
+            # Terminal state — completed timers must not be revived.
+            if row["completed_at"] is not None:
+                raise ValueError(
+                    f"Timer is completed and cannot be started: session {session_id} "
+                    f"address {address} probe {probe_index}"
+                )
+
             # Already running — idempotent no-op.
             if row["started_at"] is not None and row["paused_at"] is None:
                 return row
