@@ -1295,6 +1295,35 @@ async def test_ws_session_start_rejects_non_integer_target_duration_secs(client)
 
 
 @pytest.mark.asyncio
+async def test_status_response_includes_currentTargetDurationSecs_when_active(client):
+    """Regression (C2): status response always includes currentTargetDurationSecs
+    when a session is active so iOS clients can restore targetDurationSecs after
+    a force-quit + relaunch without waiting for another session_start broadcast."""
+    await _seed_device(client)
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "name": "Regression cook",
+                "deviceAddresses": [_TEST_DEVICE],
+                "targetDurationSecs": 3600,
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+        assert msg["payload"]["ok"] is True
+
+        await ws.send_json({
+            "v": 2, "type": "status_request", "requestId": "r2", "payload": {},
+        })
+        status = await ws.receive_json()
+        while status.get("type") != "status":
+            status = await ws.receive_json()
+        assert status["payload"]["currentTargetDurationSecs"] == 3600
+
+
+@pytest.mark.asyncio
 async def test_ws_auto_end_clears_evaluator_state(client):
     """Starting a second session while a first is active auto-ends the
     first. The evaluator's in-memory state for the previous session id
