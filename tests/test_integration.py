@@ -1752,6 +1752,60 @@ async def test_target_update_broadcast_carries_device_and_all_targets(client):
 
 
 @pytest.mark.asyncio
+async def test_session_start_ack_includes_allTargets(client):
+    """C1: session_start_ack must carry allTargets (list of per-device target
+    entries) so the initiating client's target map is complete immediately —
+    before the session_start broadcast lands — on a multi-device session."""
+    store = client.app["store"]
+    addr_a = "AA:BB:CC:DD:EE:01"
+    addr_b = "AA:BB:CC:DD:EE:02"
+    await store.upsert(addr_a, connected=True, name="Grill A")
+    await store.upsert(addr_b, connected=True, name="Grill B")
+
+    async with client.ws_connect("/ws") as ws:
+        await ws.send_json({
+            "v": 2, "type": "session_start_request", "requestId": "r1",
+            "payload": {
+                "deviceAddresses": [addr_a, addr_b],
+                "targets": [
+                    {"probe_index": 1, "mode": "fixed", "target_value": 70},
+                ],
+            },
+        })
+        msg = await ws.receive_json()
+        while msg.get("type") != "session_start_ack":
+            msg = await ws.receive_json()
+
+    payload = msg["payload"]
+    all_targets = payload.get("allTargets")
+    assert isinstance(all_targets, list), (
+        f"session_start_ack must include allTargets list; got: {all_targets!r}"
+    )
+    # Convert to dict keyed by address for convenient assertions.
+    by_address = {entry["address"]: entry["targets"] for entry in all_targets}
+    assert set(by_address.keys()) == {addr_a, addr_b}, (
+        f"allTargets must cover both session devices: {set(by_address.keys())}"
+    )
+    # Exactly two entries — catches flattening (one entry) and accidental duplication.
+    assert len(all_targets) == 2, (
+        f"allTargets must have exactly 2 entries (one per device); got {len(all_targets)}: {all_targets!r}"
+    )
+    for addr in (addr_a, addr_b):
+        probe_indices = [t["probe_index"] for t in by_address[addr]]
+        assert 1 in probe_indices, (
+            f"probe_index 1 missing from allTargets[{addr}]: {by_address[addr]}"
+        )
+        # Exactly one target per device — catches target aggregation across devices.
+        assert len(by_address[addr]) == 1, (
+            f"allTargets[{addr}] must contain exactly 1 target; got {len(by_address[addr])}: {by_address[addr]!r}"
+        )
+        # target_value must round-trip correctly for each device.
+        assert by_address[addr][0]["target_value"] == 70, (
+            f"allTargets[{addr}] target_value must be 70; got {by_address[addr][0].get('target_value')!r}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_ws_upgrade_allow_unauthed_escape_hatch(aiohttp_client, tmp_db):
     """`allow_unauthed_ws=True` bypasses upgrade auth even when a token is
     configured. Escape hatch for dev environments where the iOS client

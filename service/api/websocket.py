@@ -548,6 +548,10 @@ async def _handle_session_start(ctx: _MessageContext) -> None:
         "targetDurationSecs": target_duration_secs,
         "devices": device_addresses,
         "targets": [t.to_dict() for t in targets],
+        "allTargets": [
+            {"address": addr, "targets": [t.to_dict() for t in ts]}
+            for addr, ts in full_by_device.items()
+        ],
     }
     await send_envelope(ctx.ws, "session_start_ack", response_payload, request_id=ctx.request_id)
 
